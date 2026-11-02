@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -59,7 +60,7 @@ BPLib_Status_t BPLib_CBOR_EncodeBundle(BPLib_Bundle_t* StoredBundle,
     *(uint8_t*)CurrentOutputBufferAddr = 0x9F;
     TotalBytesCopied = 1;
     CurrentOutputBufferAddr++;
-    BytesLeftInOutputBuffer = OutputBufferSize - TotalBytesCopied;
+    BytesLeftInOutputBuffer = OutputBufferSize - TotalBytesCopied - 1;
 
     /*
     ** Begin encode
@@ -79,14 +80,14 @@ BPLib_Status_t BPLib_CBOR_EncodeBundle(BPLib_Bundle_t* StoredBundle,
     NumberOfExtensionBlocks = BPLib_CBOR_GetNumExtensionBlocks(StoredBundle);
     for (CurrExtBlockIndex = 0; CurrExtBlockIndex < NumberOfExtensionBlocks; CurrExtBlockIndex++)
     {
-        if (OutputBufferSize <= TotalBytesCopied)
+        if (OutputBufferSize <= TotalBytesCopied + 1)
         {
             *NumBytesCopied = 0;
             return BPLIB_CBOR_ENC_BUNDLE_OUTPUT_BUF_LEN_2_ERR;
         }
 
         CurrentOutputBufferAddr = (uintptr_t)(OutputBuffer) + TotalBytesCopied;
-        BytesLeftInOutputBuffer = OutputBufferSize - TotalBytesCopied;
+        BytesLeftInOutputBuffer = OutputBufferSize - TotalBytesCopied - 1;
 
         /* Encode extension block */
         ExtensionBlockReturnStatus = BPLib_CBOR_EncodeExtensionBlock(StoredBundle,
@@ -100,14 +101,14 @@ BPLib_Status_t BPLib_CBOR_EncodeBundle(BPLib_Bundle_t* StoredBundle,
     }
 
     /* make sure we have more room in our output buffer, before we try to add the payload */
-    if (OutputBufferSize <= TotalBytesCopied)
+    if (OutputBufferSize <= TotalBytesCopied + 1)
     {
         *NumBytesCopied = 0;
         return BPLIB_CBOR_ENC_BUNDLE_OUTPUT_BUF_LEN_3_ERR;
     }
 
     CurrentOutputBufferAddr = (uintptr_t)(OutputBuffer) + TotalBytesCopied;
-    BytesLeftInOutputBuffer = OutputBufferSize - TotalBytesCopied;
+    BytesLeftInOutputBuffer = OutputBufferSize - TotalBytesCopied - 1;
 
     PayloadBlockReturnStatus = BPLib_CBOR_CopyOrEncodePayload(StoredBundle,
                                                                 (void*)CurrentOutputBufferAddr,

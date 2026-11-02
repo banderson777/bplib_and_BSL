@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -23,6 +24,8 @@
 /* ======== */
 
 #include "bplib_mem.h"
+#include "bplib_bblocks.h"
+#include <stdlib.h>
 #include "bplib_ct.h"
 
 #include <stdio.h>
@@ -54,7 +57,7 @@ BPLib_Status_t BPLib_MEM_PoolInit(BPLib_MEM_Pool_t* pool, void* init_mem, size_t
     }
 
     memset(pool, 0, sizeof(BPLib_MEM_Pool_t));
-    memset(init_mem, 0, sizeof(init_size));
+    memset(init_mem, 0, init_size);
 
     pthread_mutex_init(&pool->lock, NULL);
     
@@ -212,7 +215,7 @@ BPLib_Bundle_t* BPLib_MEM_BundleAlloc(BPLib_MEM_Pool_t* pool, const void* blob_d
     curr_block = BPLib_MEM_BlockListAlloc(pool, data_len, BPLIB_MEM_BIG_BLK_SIZE);
     if (curr_block == NULL)
     {
-        BPLib_MEM_BlockFree(pool, (BPLib_MEM_Block_t *) bundle);
+        BPLib_MEM_BlockFree(pool, BPLib_MEM_GetBlockFromUserData(bundle));
         return NULL;
     }
 
@@ -304,19 +307,7 @@ BPLib_Status_t BPLib_MEM_BlobCopyOut(BPLib_Bundle_t* bundle, void* out_buffer, s
 BPLib_Status_t BPLib_MEM_CopyOutFromOffset(BPLib_Bundle_t* Bundle, uint64_t Offset,
                     uint64_t NumBytesToCopy, void* OutputBuffer, size_t OutputBufferSize)
 {
-    BPLib_Status_t ReturnStatus = BPLIB_SUCCESS;
-    BPLib_MEM_Block_t *CurrentBlock;
-    uint64_t NumBytesLeftToSkip;
-    uint64_t BytesLeftInThisBlock;
-    uint64_t BytesToCopyInThisBlock;
-    uint64_t RemainingBytesToCopy;
-    uint64_t TotalBytesCopied;
-    uintptr_t CurrentInputOffset;
-    uintptr_t CurrentOutputPointer;
-    uint64_t ExpectedMemBlockNumber;
-    uint64_t CurrentMemBlockNumber;
-
-    if ((Bundle == NULL) || (OutputBuffer == NULL) || (Bundle->blob == NULL))
+    if (Bundle == NULL || OutputBuffer == NULL || Bundle->blob == NULL)
     {
         return BPLIB_NULL_PTR_ERROR;
     }
@@ -325,65 +316,46 @@ BPLib_Status_t BPLib_MEM_CopyOutFromOffset(BPLib_Bundle_t* Bundle, uint64_t Offs
         return BPLIB_BUF_LEN_ERROR;
     }
 
-    /* find the first blob that contains data after the offset */
-    CurrentBlock = Bundle->blob;
-    NumBytesLeftToSkip = Offset;
-    ExpectedMemBlockNumber = Offset / BPLIB_MEM_BIG_BLK_DATA_SIZE;
-    for (CurrentMemBlockNumber = 0; CurrentMemBlockNumber < ExpectedMemBlockNumber; CurrentMemBlockNumber++)
+    BPLib_MEM_Block_t *block = Bundle->blob;
+    uint64_t skip = Offset;
+    while (block && skip >= block->used_len)
     {
-        NumBytesLeftToSkip -= BPLIB_MEM_BIG_BLK_DATA_SIZE;
-        CurrentBlock = CurrentBlock->next;
-        if (CurrentBlock == NULL)
-        {
-            return BPLIB_BUF_LEN_ERROR;
-        }
+        skip -= block->used_len;
+        block = block->next;
+    }
+    if (!block)
+    {
+        return skip == 0 && NumBytesToCopy == 0 ? BPLIB_SUCCESS : BPLIB_BUF_LEN_ERROR;
     }
 
-    /* Start copying from the first block */
-    CurrentOutputPointer = (uintptr_t) OutputBuffer;
-    CurrentInputOffset = (uintptr_t) &CurrentBlock->user_data.BigData[NumBytesLeftToSkip];
-    BytesLeftInThisBlock = BPLIB_MEM_BIG_BLK_DATA_SIZE - NumBytesLeftToSkip;
-    if (NumBytesToCopy <= BytesLeftInThisBlock)
+    /* Validate the entire range before exposing any bytes to the caller.
+     * Allocation capacity includes unused bytes and is not the blob length. */
+    uint64_t remaining = NumBytesToCopy;
+    uint64_t offset = skip;
+    BPLib_MEM_Block_t *probe = block;
+    while (probe && remaining)
     {
-        memcpy((void*)CurrentOutputPointer, (void*)CurrentInputOffset, NumBytesToCopy);
-        TotalBytesCopied = NumBytesToCopy;
+        uint64_t available = probe->used_len - offset;
+        if (available > remaining) available = remaining;
+        remaining -= available;
+        probe = probe->next;
+        offset = 0;
     }
-    else
-    {
-        memcpy((void*)CurrentOutputPointer, (void*)CurrentInputOffset, BytesLeftInThisBlock);
-        TotalBytesCopied = BytesLeftInThisBlock;
-    }
+    if (remaining) return BPLIB_MEM_CPY_FRM_OFFSET_NE_ERR;
 
-    /* if we need to copy more data, loop through each next block */
-    while ((TotalBytesCopied < NumBytesToCopy) && (CurrentBlock->next != NULL))
+    uint8_t *output = OutputBuffer;
+    remaining = NumBytesToCopy;
+    while (remaining)
     {
-        CurrentBlock = CurrentBlock->next;
-        CurrentInputOffset = (uintptr_t) &CurrentBlock->user_data.BigData[0];
-        CurrentOutputPointer = (uintptr_t)(OutputBuffer) + TotalBytesCopied;
-
-        RemainingBytesToCopy = NumBytesToCopy - TotalBytesCopied;
-        if (RemainingBytesToCopy >= BPLIB_MEM_BIG_BLK_DATA_SIZE)
-        {
-            BytesToCopyInThisBlock = BPLIB_MEM_BIG_BLK_DATA_SIZE;
-        }
-        else
-        {
-            BytesToCopyInThisBlock = RemainingBytesToCopy;
-        }
-        memcpy((void*)CurrentOutputPointer, (void*)CurrentInputOffset, BytesToCopyInThisBlock);
-        TotalBytesCopied += BytesToCopyInThisBlock;
+        size_t count = block->used_len - (size_t)skip;
+        if (count > remaining) count = (size_t)remaining;
+        memcpy(output, block->user_data.BigData + skip, count);
+        output += count;
+        remaining -= count;
+        block = block->next;
+        skip = 0;
     }
-
-    if (TotalBytesCopied != NumBytesToCopy)
-    {
-        ReturnStatus = BPLIB_MEM_CPY_FRM_OFFSET_NE_ERR;
-    }
-    else
-    {
-        ReturnStatus = BPLIB_SUCCESS;
-    }
-
-    return ReturnStatus;
+    return BPLIB_SUCCESS;
 }
 
 size_t BPLib_MEM_GetBytesInUse(BPLib_MEM_Pool_t *Pool)
@@ -405,4 +377,71 @@ BPLib_MEM_Block_t *BPLib_MEM_GetBlockFromUserData(void *UserData)
 {
     /* Return pointer to the top of the mem block if given a pointer to a block's user_data */
     return (BPLib_MEM_Block_t*)((uintptr_t)UserData - offsetof(BPLib_MEM_Block_t, user_data));
+}
+
+static BPLib_CanBlockHeader_t *BPLib_BlockHeaderFind(BPLib_Bundle_t *bundle, uint64_t num)
+{
+    if (!bundle) return NULL;
+    if (bundle->blocks.PayloadHeader.BlockNum == num) return &bundle->blocks.PayloadHeader;
+    for (size_t i = 0; i < BPLIB_MAX_NUM_EXTENSION_BLOCKS; ++i)
+    {
+        if (bundle->blocks.ExtBlocks[i].Header.BlockNum == num) return &bundle->blocks.ExtBlocks[i].Header;
+    }
+    return NULL;
+}
+
+BPLib_Status_t BPLib_BlockReaderOpen(BPLib_Bundle_t *bundle, uint64_t num, BPLib_BlockReader_t *reader)
+{
+    BPLib_CanBlockHeader_t *h = BPLib_BlockHeaderFind(bundle, num);
+    if (!h || !reader || !bundle->blob || h->DataSize == 0) return BPLIB_NULL_PTR_ERROR;
+    reader->bundle = bundle; reader->offset = h->DataOffsetStart; reader->remaining = h->DataSize;
+    return BPLIB_SUCCESS;
+}
+
+BPLib_Status_t BPLib_BlockReaderRead(BPLib_BlockReader_t *reader, void *buf, size_t cap, size_t *got)
+{
+    if (!reader || !buf || !got) return BPLIB_NULL_PTR_ERROR;
+    size_t n = (reader->remaining < cap) ? reader->remaining : cap;
+    if (!n) { *got = 0; return BPLIB_SUCCESS; }
+    BPLib_Status_t st = BPLib_MEM_CopyOutFromOffset(reader->bundle, reader->offset, n, buf, cap);
+    if (st == BPLIB_SUCCESS) { reader->offset += n; reader->remaining -= n; *got = n; }
+    else *got = 0;
+    return st;
+}
+
+BPLib_Status_t BPLib_BlockWriterOpen(BPLib_Bundle_t *bundle, uint64_t num, size_t len, BPLib_BlockWriter_t *writer)
+{
+    BPLib_CanBlockHeader_t *h = BPLib_BlockHeaderFind(bundle, num);
+    if (!h || !writer || !bundle->blob || len != h->DataSize) return BPLIB_BUF_LEN_ERROR;
+    writer->staging = malloc(len);
+    if (!writer->staging) return BPLIB_ERROR;
+    writer->bundle = bundle; writer->offset = h->DataOffsetStart; writer->remaining = len; writer->total = len; writer->block_num = num; writer->written = 0;
+    return BPLIB_SUCCESS;
+}
+
+BPLib_Status_t BPLib_BlockWriterWrite(BPLib_BlockWriter_t *writer, const void *buf, size_t len)
+{
+    if (!writer || !buf) return BPLIB_NULL_PTR_ERROR;
+    if (len > writer->remaining) return BPLIB_BUF_LEN_ERROR;
+    memcpy(writer->staging + writer->written, buf, len);
+    writer->written += len; writer->remaining -= len;
+    return BPLIB_SUCCESS;
+}
+
+BPLib_Status_t BPLib_BlockWriterClose(BPLib_BlockWriter_t *writer, bool success)
+{
+    if (!writer) return BPLIB_NULL_PTR_ERROR;
+    if (success && writer->remaining != 0) { free(writer->staging); return BPLIB_BUF_LEN_ERROR; }
+    if (success)
+    {
+        BPLib_CanBlockHeader_t *h = BPLib_BlockHeaderFind(writer->bundle, writer->block_num);
+        if (h) h->RequiresEncode = true;
+        BPLib_MEM_Block_t *blk = writer->bundle->blob;
+        uint64_t skip = h ? h->DataOffsetStart : 0;
+        while (blk && skip >= blk->used_len) { skip -= blk->used_len; blk = blk->next; }
+        size_t left = writer->total; const uint8_t *src = writer->staging;
+        while (blk && left) { size_t n = blk->used_len - (size_t)skip; if (n > left) n = left; memcpy(blk->user_data.BigData + skip, src, n); src += n; left -= n; blk = blk->next; skip = 0; }
+    }
+    free(writer->staging); writer->staging = NULL;
+    return BPLIB_SUCCESS;
 }

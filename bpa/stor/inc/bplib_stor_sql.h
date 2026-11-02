@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -35,14 +36,7 @@
 /* Globals */
 /* ======= */
 
-/* SQL query statements */
-
-extern sqlite3_stmt* GetNumBundlesStmt;
-extern sqlite3_stmt* TotalBytesStmt;
-extern sqlite3_stmt* DiscardExpiredStmt;
-extern sqlite3_stmt* ExpiredBytesStmt;
-extern sqlite3_stmt* DiscardEgressedStmt;
-extern sqlite3_stmt* EgressedBytesStmt;
+/* Prepared statements are owned by individual calls, never shared globally. */
 
 /* SQL query strings */
 

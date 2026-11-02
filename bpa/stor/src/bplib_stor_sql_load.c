@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -22,6 +23,9 @@
 #include "bplib_stor_sql_load.h"
 #include "bplib_stor.h"
 #include "bplib_inst.h"
+#include "bplib_cbor.h"
+#include "bplib_nc.h"
+#include <stdlib.h>
 
 #include <stdio.h>
 
@@ -31,20 +35,14 @@
 
 /* SQL query statements */
 
-sqlite3_stmt* FindBlobStmt;
-sqlite3_stmt* FindForEgressIDStmt;
-sqlite3_stmt* MarkEgressedStmt;
-sqlite3_stmt* ResetRetransmitStmt;
 
 /* SQL query strings */
 
 const char* FindBlobSQL =
-"SELECT id\n"
-"FROM bundle_blobs\n"
-"WHERE bundle_row = ?;";
+"SELECT bundle_blobs.id, bundle_bytes, is_custodial, retransmit_trigger\n"
+"FROM bundle_blobs JOIN bundle_data ON bundle_data.id = bundle_blobs.bundle_row\n"
+"WHERE bundle_row = ? ORDER BY bundle_blobs.id;";
 
-char FindForEgressIdSQL[BPLIB_SQL_MAX_STRLEN] = {0};
-char FindForEgressIdRetransmitSQL[BPLIB_SQL_MAX_STRLEN] = {0};
 
 const char* MarkEgressedSQL =
 "UPDATE bundle_data SET egress_attempted = 1 WHERE (id = ? AND is_custodial = 0);";
@@ -79,12 +77,18 @@ BPLib_Status_t BPLib_SQL_FindForEIDs(BPLib_Instance_t* Inst, BPLib_STOR_LoadBatc
     char           WhereClause[BPLIB_SQL_MAX_STRLEN] = {0};
 
     Status      = BPLIB_SUCCESS;
-    db          = Inst->BundleStorage.db;
 
     if ((Inst == NULL) || (Batch == NULL) || (DestEIDs == NULL))
     {
         return BPLIB_NULL_PTR_ERROR;
     }
+
+    /* Appended IDs become visible only if the complete selection succeeds.
+     * Keep the configurable batch array off the stack; restoring its logical
+     * bounds is sufficient because AddID never overwrites existing entries. */
+    size_t InitialSize = Batch->Size;
+    size_t InitialReadIndex = Batch->ReadIndex;
+    db = Inst->BundleStorage.db;
 
     if ((NumEIDs == 0) || (NumEIDs > BPLIB_MAX_CONTACT_DEST_EIDS))
     {
@@ -108,18 +112,10 @@ BPLib_Status_t BPLib_SQL_FindForEIDs(BPLib_Instance_t* Inst, BPLib_STOR_LoadBatc
     ** sqlite to use the right index, otherwise it will try to use the much slower
     ** egress_attempted index by default, which will result in worse performance.
     */
-    if (LocalDelivery)
-    {
-        snprintf(FindForEgressIdSQL, BPLIB_SQL_MAX_STRLEN, FindForEgressIdLocalBaseSQL,
-                WhereClause);
-    }
-    else
-    {
-        snprintf(FindForEgressIdSQL, BPLIB_SQL_MAX_STRLEN, FindForEgressIdBaseSQL,
-                WhereClause);
-    }
-
-    FindForEgressIdSQL[strlen(FindForEgressIdSQL)] = '\0';
+    char *FindForEgressIdSQL = sqlite3_mprintf(
+        LocalDelivery ? FindForEgressIdLocalBaseSQL : FindForEgressIdBaseSQL, WhereClause);
+    if (FindForEgressIdSQL == NULL) return BPLIB_STOR_SQL_LOAD_IDS_ERR;
+    sqlite3_stmt *FindForEgressIDStmt = NULL;
 
     /* Prepare Search Statements needed for this batch query */
     SQLStatus = sqlite3_prepare_v2(db, FindForEgressIdSQL, -1, &FindForEgressIDStmt, 0);
@@ -132,7 +128,7 @@ BPLib_Status_t BPLib_SQL_FindForEIDs(BPLib_Instance_t* Inst, BPLib_STOR_LoadBatc
     if (Status == BPLIB_SUCCESS)
     {
         /* Run Batch Load Logic */
-        SQLStatus = BPLib_SQL_FindForEIDsImpl(Inst, Batch, DestEIDs, NumEIDs, BPLIB_STOR_LOADBATCHSIZE, LocalDelivery);
+        SQLStatus = BPLib_SQL_FindForEIDsImpl(Inst, Batch, DestEIDs, NumEIDs, BPLIB_STOR_LOADBATCHSIZE, LocalDelivery, FindForEgressIDStmt);
 
         if (SQLStatus != SQLITE_OK)
         {
@@ -141,14 +137,22 @@ BPLib_Status_t BPLib_SQL_FindForEIDs(BPLib_Instance_t* Inst, BPLib_STOR_LoadBatc
     }
 
     /* Cleanup/Finalize */
-    sqlite3_finalize(FindForEgressIDStmt);
+    int FinalStatus = sqlite3_finalize(FindForEgressIDStmt);
+    sqlite3_free(FindForEgressIdSQL);
+    if (Status == BPLIB_SUCCESS && FinalStatus != SQLITE_OK)
+        Status = BPLIB_STOR_SQL_LOAD_IDS_ERR;
+    if (Status != BPLIB_SUCCESS)
+    {
+        Batch->Size = InitialSize;
+        Batch->ReadIndex = InitialReadIndex;
+    }
 
     return Status;
 }
 
 SQL_Status_t BPLib_SQL_FindForEIDsImpl(BPLib_Instance_t* Inst, BPLib_STOR_LoadBatch_t* Batch,
                                         BPLib_EID_Pattern_t* DestEIDs, size_t NumEIDs,
-                                        size_t MaxBundles, bool LocalDelivery)
+                                        size_t MaxBundles, bool LocalDelivery, sqlite3_stmt *FindForEgressIDStmt)
 {
     SQL_Status_t  SQLStatus;
     sqlite3*      db;
@@ -165,7 +169,7 @@ SQL_Status_t BPLib_SQL_FindForEIDsImpl(BPLib_Instance_t* Inst, BPLib_STOR_LoadBa
     /* Bind destination EID query */
     for (i = 0; i < NumEIDs; i++)
     {
-        if (DestEIDs[i].MaxNode == 0 && DestEIDs[i].MaxNode == 0)
+        if (DestEIDs[i].MaxNode == 0 && DestEIDs[i].MaxService == 0)
         {
             break;
         }
@@ -265,169 +269,138 @@ SQL_Status_t BPLib_SQL_FindForEIDsImpl(BPLib_Instance_t* Inst, BPLib_STOR_LoadBa
     return SQLStatus;
 }
 
-BPLib_Status_t BPLib_SQL_MarkBatchEgressed(BPLib_Instance_t* Inst, 
-                            BPLib_STOR_LoadBatch_t* Batch, bool LocalDelivery)
+BPLib_Status_t BPLib_SQL_MarkBatchEgressed(BPLib_Instance_t *Inst,
+                                         BPLib_STOR_LoadBatch_t *Batch, bool LocalDelivery)
 {
-    BPLib_Status_t Status;
-    SQL_Status_t   SQLStatus;
-    sqlite3*       db;
-
-    Status = BPLIB_SUCCESS;
-    db     = Inst->BundleStorage.db;
-
-    if (Inst == NULL)
-    {
-        return BPLIB_NULL_PTR_ERROR;
-    }
-
-    if (LocalDelivery)
-    {
-        SQLStatus = sqlite3_prepare_v2(db, MarkEgressedLocalSQL, -1, &MarkEgressedStmt, 0);
-        if (SQLStatus != SQLITE_OK)
-        {
-            fprintf(stderr, "Programming Error: MarkEgressedLocalSQL prepare failed, error=%s\n", sqlite3_errmsg(db));
-            Status = BPLIB_STOR_SQL_MARK_EGRESSED_ERR;
-        }        
-    }
-    else
-    {
-        SQLStatus = sqlite3_prepare_v2(db, MarkEgressedSQL, -1, &MarkEgressedStmt, 0);
-        if (SQLStatus != SQLITE_OK)
-        {
-            fprintf(stderr, "Programming Error: MarkEgressedSQL prepare failed, error=%s\n", sqlite3_errmsg(db));
-            Status = BPLIB_STOR_SQL_MARK_EGRESSED_ERR;
-        }
-
-        if (SQLStatus == SQLITE_OK)
-        {
-            SQLStatus = sqlite3_prepare_v2(db, ResetRetransmitTriggerSQL, -1, &ResetRetransmitStmt, 0);
-        }
-
-        if (SQLStatus != SQLITE_OK)
-        {
-            fprintf(stderr, "Programming Error: ResetRetransmitTriggerSQL prepare failed, error=%s\n", sqlite3_errmsg(db));
-            Status = BPLIB_STOR_SQL_MARK_EGRESSED_ERR;
-        }
-    }
-
-    if (Status == BPLIB_SUCCESS)
-    {
-        SQLStatus = BPLib_SQL_MarkBatchEgressedImpl(Inst, Batch, LocalDelivery);
-    }
-
+    if (Inst == NULL || Batch == NULL) return BPLIB_NULL_PTR_ERROR;
+    if (Batch->Size > BPLIB_STOR_LOADBATCHSIZE) return BPLIB_STOR_PARAM_ERR;
+    if (Batch->Size == 0) return BPLIB_SUCCESS;
+    sqlite3 *db = Inst->BundleStorage.db;
+    sqlite3_stmt *MarkEgressedStmt = NULL;
+    sqlite3_stmt *ResetRetransmitStmt = NULL;
+    SQL_Status_t Status = sqlite3_prepare_v2(db,
+        LocalDelivery ? MarkEgressedLocalSQL : MarkEgressedSQL, -1, &MarkEgressedStmt, NULL);
+    if (Status == SQLITE_OK && !LocalDelivery)
+        Status = sqlite3_prepare_v2(db, ResetRetransmitTriggerSQL, -1, &ResetRetransmitStmt, NULL);
+    if (Status == SQLITE_OK)
+        Status = BPLib_SQL_MarkBatchEgressedImpl(Inst, Batch, LocalDelivery, MarkEgressedStmt, ResetRetransmitStmt);
     sqlite3_finalize(MarkEgressedStmt);
-
-    if (LocalDelivery == false)
-    {
-        sqlite3_finalize(ResetRetransmitStmt);
-    }
-
-    if (SQLStatus != SQLITE_OK)
-    {
-        fprintf(stderr, "Programming Error: MarkEgressedSQL finalize failed, error=%s\n", sqlite3_errmsg(db));
-        return BPLIB_STOR_SQL_MARK_EGRESSED_ERR;
-    }
-
-    return BPLIB_SUCCESS;
+    sqlite3_finalize(ResetRetransmitStmt);
+    return Status == SQLITE_OK ? BPLIB_SUCCESS : BPLIB_STOR_SQL_MARK_EGRESSED_ERR;
 }
 
-SQL_Status_t BPLib_SQL_MarkBatchEgressedImpl(BPLib_Instance_t* Inst, 
-                                    BPLib_STOR_LoadBatch_t* Batch, bool LocalDelivery)
+SQL_Status_t BPLib_SQL_MarkBatchEgressedImpl(BPLib_Instance_t *Inst,
+                                          BPLib_STOR_LoadBatch_t *Batch, bool LocalDelivery,
+                                          sqlite3_stmt *MarkEgressedStmt, sqlite3_stmt *ResetRetransmitStmt)
 {
-    SQL_Status_t SQLStatus;
-    sqlite3*     db;
-    size_t       i;
-    size_t       NumEgressed = 0;
-
-    db = Inst->BundleStorage.db;
-
-    /* Create a batch query */
-    SQLStatus = sqlite3_exec(db, "BEGIN;", 0, 0, 0);
-    if (SQLStatus != SQLITE_OK)
+    sqlite3 *db = Inst->BundleStorage.db;
+    size_t NumEgressed = 0;
+    if (Batch->Size == 0) return SQLITE_OK;
+    SQL_Status_t Status = sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL);
+    if (Status != SQLITE_OK) return Status;
+    for (size_t Row = 0; Row < Batch->Size; ++Row)
     {
-        fprintf(stderr, "Failed to start transaction\n");
-        return SQLStatus;
-    }
-
-    /* Go through the load batch and add each ID as egressed */
-    for (i = 0; i < Batch->Size; i++)
-    {
-        /* Mark bundles as egressed */
         sqlite3_reset(MarkEgressedStmt);
-
-        SQLStatus = sqlite3_bind_int64(MarkEgressedStmt, 1, Batch->BundleRowIDs[i]);
-        if (SQLStatus != SQLITE_OK)
-        {
-            fprintf(stderr, "Failed to bind bundle_id: %s\n", sqlite3_errmsg(db));
-            break;
-        }
-
-        SQLStatus = sqlite3_step(MarkEgressedStmt);
-        if (SQLStatus != SQLITE_DONE)
-        {
-            fprintf(stderr, "Mark Egressed Failed: %s\n", sqlite3_errstr(SQLStatus));
-            break;
-        }
-
+        Status = sqlite3_bind_int64(MarkEgressedStmt, 1, Batch->BundleRowIDs[Row]);
+        if (Status != SQLITE_OK) goto rollback;
+        Status = sqlite3_step(MarkEgressedStmt);
+        if (Status != SQLITE_DONE) goto rollback;
         NumEgressed += sqlite3_changes(db);
     }
-
-    if (LocalDelivery == false)
+    if (!LocalDelivery)
     {
-        /* Go through the load batch and reset the retransmit triggers */
-        for (i = 0; i < Batch->Size; i++)
+        for (size_t Row = 0; Row < Batch->Size; ++Row)
         {
             sqlite3_reset(ResetRetransmitStmt);
-
-            SQLStatus = sqlite3_bind_int64(ResetRetransmitStmt, 1, BPLib_TIME_GetMonotonicTime());
-            if (SQLStatus != SQLITE_OK)
-            {
-                fprintf(stderr, "Failed to bind retransmission_timestamp: %s\n", sqlite3_errmsg(db));
-                break;
-            }
-
-            SQLStatus = sqlite3_bind_int64(ResetRetransmitStmt, 2, Batch->BundleRowIDs[i]);
-            if (SQLStatus != SQLITE_OK)
-            {
-                fprintf(stderr, "Failed to bind bundle_id: %s\n", sqlite3_errmsg(db));
-                break;
-            }
-
-            SQLStatus = sqlite3_step(ResetRetransmitStmt);
-            if (SQLStatus != SQLITE_DONE)
-            {
-                fprintf(stderr, "Reset Transmit Failed: %s\n", sqlite3_errstr(SQLStatus));
-                break;
-            }
-        }        
-    }
-
-    /* If there have been no errors so far, batch-write the data to persistent storage */
-    if (SQLStatus == SQLITE_DONE)
-    {
-        SQLStatus = sqlite3_exec(db, "COMMIT;", 0, 0, 0);
-        if (SQLStatus != SQLITE_OK)
-        {
-            fprintf(stderr, "Failed to commit transaction\n");
+            Status = sqlite3_bind_int64(ResetRetransmitStmt, 1, BPLib_TIME_GetMonotonicTime());
+            if (Status != SQLITE_OK) goto rollback;
+            Status = sqlite3_bind_int64(ResetRetransmitStmt, 2, Batch->BundleRowIDs[Row]);
+            if (Status != SQLITE_OK) goto rollback;
+            Status = sqlite3_step(ResetRetransmitStmt);
+            if (Status != SQLITE_DONE) goto rollback;
         }
     }
+    Status = sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+    if (Status != SQLITE_OK) goto rollback;
+    Inst->BundleStorage.BundleCountNotEgressed -= NumEgressed;
+    return SQLITE_OK;
+rollback:
+    sqlite3_reset(MarkEgressedStmt);
+    if (!LocalDelivery) sqlite3_reset(ResetRetransmitStmt);
+    if (!sqlite3_get_autocommit(db) && sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL) != SQLITE_OK)
+        fprintf(stderr, "Failed to roll back egress batch: %s\n", sqlite3_errmsg(db));
+    return Status;
+}
 
-    /* The batch commit was not successful, ROLLBACK to prevent DB corruption */
-    if (SQLStatus != SQLITE_OK)
+/* New records contain wire bytes plus SQL scalar metadata, never C layouts. */
+static BPLib_Status_t BPLib_SQL_LoadPortable(BPLib_Instance_t *Inst, int64_t Row,
+                                           sqlite3_stmt *Info, BPLib_Bundle_t **Out)
+{
+    sqlite3_int64 Values[9];
+    for (int i = 0; i < 9; ++i)
     {
-        SQLStatus = sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
-        if (SQLStatus != SQLITE_OK)
+        if (sqlite3_column_type(Info, i) != SQLITE_INTEGER) return BPLIB_STOR_SQL_LOAD_ERR;
+        Values[i] = sqlite3_column_int64(Info, i);
+    }
+    /* version, ingress, local origin, wire length, custody flag, timer */
+    if (Values[0] != 2 || Values[1] < 0 || Values[1] > UINT32_MAX ||
+        (Values[2] != 0 && Values[2] != 1) || Values[3] <= 0 ||
+        (uint64_t)Values[3] > BPLib_NC_GetNodeConfigValue(PARAM_SET_MAX_BUNDLE_LENGTH) ||
+        (uint64_t)Values[3] > SIZE_MAX - sizeof(BPLib_BBlocks_t) ||
+        (Values[4] != 0 && Values[4] != 1) || Values[5] < 0 || Values[5] > UINT32_MAX || Values[6] < 0 || Values[6] > UINT32_MAX ||
+        Values[7] < 0 || Values[8] < 0 || Values[8] > UINT32_MAX)
+        return BPLIB_STOR_SQL_LOAD_ERR;
+    size_t Length = (size_t)Values[3], Offset = 0;
+    unsigned char *Wire = malloc(Length);
+    if (Wire == NULL) return BPLIB_STOR_NO_MEM_ERR;
+    sqlite3_stmt *Chunks = NULL;
+    int Rc = sqlite3_prepare_v2(Inst->BundleStorage.db,
+        "SELECT blob_data FROM bundle_blobs WHERE bundle_row=? ORDER BY id;", -1, &Chunks, NULL);
+    if (Rc == SQLITE_OK) Rc = sqlite3_bind_int64(Chunks, 1, Row);
+    if (Rc == SQLITE_OK) Rc = sqlite3_step(Chunks);
+    while (Rc == SQLITE_ROW)
+    {
+        int Bytes = sqlite3_column_bytes(Chunks, 0);
+        const void *Data = sqlite3_column_blob(Chunks, 0);
+        if (sqlite3_column_type(Chunks, 0) != SQLITE_BLOB || Bytes <= 0 || Data == NULL ||
+            (size_t)Bytes > Length - Offset)
+        { Rc = SQLITE_CORRUPT; break; }
+        memcpy(Wire + Offset, Data, Bytes);
+        Offset += Bytes;
+        Rc = sqlite3_step(Chunks);
+    }
+    sqlite3_finalize(Chunks);
+    BPLib_Status_t Status = BPLIB_STOR_SQL_LOAD_ERR;
+    if (Rc == SQLITE_DONE && Offset == Length)
+    {
+        BPLib_Bundle_t *Bundle = BPLib_MEM_BundleAlloc(&Inst->pool, Wire, Length);
+        if (Bundle == NULL) Status = BPLIB_STOR_NO_MEM_ERR;
+        else
         {
-            fprintf(stderr, "Failed to rollback transaction, RC=%d\n", SQLStatus);
+            Status = BPLib_CBOR_DecodeBundle(Inst, Wire, Length, Bundle);
+            if (Status == BPLIB_SUCCESS)
+            {
+                Bundle->blocks.PrimaryBlock.BundleId = (uint32_t)Values[6];
+                Bundle->blocks.PrimaryBlock.MonoTime.Time = Values[7];
+                Bundle->blocks.PrimaryBlock.MonoTime.BootEra = (uint32_t)Values[8];
+                Bundle->Meta.IngressID = (uint32_t)Values[1];
+                Bundle->Meta.EgressID = UINT32_MAX;
+                Bundle->Meta.LocalBundle = Values[2] != 0;
+                Bundle->Meta.IsCustodial = Values[4] != 0;
+                Bundle->Meta.RetransmitTime = (uint32_t)Values[5];
+                *Out = Bundle;
+            }
+            else
+            {
+                BPLib_MEM_BundleFree(&Inst->pool, Bundle);
+                Status = Status == BPLIB_CBOR_DEC_ADMIN_RECORD_NULL_ERR ?
+                         BPLIB_STOR_NO_MEM_ERR : BPLIB_STOR_SQL_LOAD_ERR;
+            }
         }
     }
-    else
-    {
-        Inst->BundleStorage.BundleCountNotEgressed -= NumEgressed;
-    }
-
-    /* Expecting SQLITE_OK */
-    return SQLStatus;
+    else if (Rc == SQLITE_NOMEM) Status = BPLIB_STOR_NO_MEM_ERR;
+    free(Wire);
+    return Status;
 }
 
 BPLib_Status_t BPLib_SQL_LoadBundle(BPLib_Instance_t* Inst, int64_t BundleRowID,
@@ -437,19 +410,31 @@ BPLib_Status_t BPLib_SQL_LoadBundle(BPLib_Instance_t* Inst, int64_t BundleRowID,
     SQL_Status_t   SQLStatus;
     sqlite3*       db;
 
+    if (Bundle == NULL) return BPLIB_NULL_PTR_ERROR;
+    *Bundle = NULL;
+    if (Inst == NULL) return BPLIB_NULL_PTR_ERROR;
+    if (BundleRowID < 0) return BPLIB_STOR_PARAM_ERR;
     Status = BPLIB_SUCCESS;
-    db     = Inst->BundleStorage.db;
+    db = Inst->BundleStorage.db;
 
-    if ((Inst == NULL) || (Bundle == NULL))
+    sqlite3_stmt *Info = NULL;
+    SQLStatus = sqlite3_prepare_v2(db,
+        "SELECT r.format,r.ingress_id,r.local_bundle,r.wire_bytes,b.is_custodial,b.retransmit_trigger,b.bundle_id,r.receipt_time,r.receipt_era "
+        "FROM bundle_recovery r JOIN bundle_data b ON b.id=r.bundle_row WHERE b.id=?;",
+        -1, &Info, NULL);
+    if (SQLStatus == SQLITE_OK) SQLStatus = sqlite3_bind_int64(Info, 1, BundleRowID);
+    if (SQLStatus == SQLITE_OK) SQLStatus = sqlite3_step(Info);
+    if (SQLStatus == SQLITE_ROW)
     {
-        return BPLIB_NULL_PTR_ERROR;
+        Status = BPLib_SQL_LoadPortable(Inst, BundleRowID, Info, Bundle);
+        sqlite3_finalize(Info);
+        return Status;
     }
+    sqlite3_finalize(Info);
+    if (SQLStatus != SQLITE_DONE)
+        return SQLStatus == SQLITE_NOMEM ? BPLIB_STOR_NO_MEM_ERR : BPLIB_STOR_SQL_LOAD_ERR;
 
-    if (BundleRowID < 0)
-    {
-        return BPLIB_STOR_PARAM_ERR;
-    }
-
+    sqlite3_stmt *FindBlobStmt = NULL;
     SQLStatus = sqlite3_prepare_v2(db, FindBlobSQL, -1, &FindBlobStmt, 0);
     if (SQLStatus != SQLITE_OK)
     {
@@ -459,7 +444,7 @@ BPLib_Status_t BPLib_SQL_LoadBundle(BPLib_Instance_t* Inst, int64_t BundleRowID,
 
     if (Status == BPLIB_SUCCESS)
     {
-        SQLStatus = BPLib_SQL_LoadBundleImpl(Inst, BundleRowID, Bundle);
+        SQLStatus = BPLib_SQL_LoadBundleImpl(Inst, BundleRowID, Bundle, FindBlobStmt);
     }
 
     sqlite3_finalize(FindBlobStmt);
@@ -468,25 +453,26 @@ BPLib_Status_t BPLib_SQL_LoadBundle(BPLib_Instance_t* Inst, int64_t BundleRowID,
     {
         Status = BPLIB_STOR_NO_MEM_ERR;
     }
+    else if (SQLStatus != SQLITE_OK && SQLStatus != SQLITE_DONE)
+    {
+        Status = BPLIB_STOR_SQL_LOAD_ERR;
+    }
     else if (*Bundle == NULL)
     {
         Status = BPLIB_STOR_NO_BUNDLE_FOUND_ERR;
-    }
-    else if (SQLStatus != SQLITE_OK)
-    {
-        Status = BPLIB_STOR_SQL_LOAD_ERR;
     }
 
     return Status;
 }
 
 SQL_Status_t BPLib_SQL_LoadBundleImpl(BPLib_Instance_t* Inst, int64_t BundleRowID,
-                                        BPLib_Bundle_t** Bundle)
+                                        BPLib_Bundle_t** Bundle, sqlite3_stmt *FindBlobStmt)
 {
     SQL_Status_t       SQLStatus;
     sqlite3_blob*      blob;
     int64_t            BlobRowId;
     size_t             ChunkSize;
+    size_t             LoadedBytes = sizeof(BPLib_BBlocks_t);
     BPLib_MEM_Block_t* BundleHead;
     BPLib_MEM_Block_t* CurrBlock;
     BPLib_MEM_Block_t* NextBlock;
@@ -494,6 +480,7 @@ SQL_Status_t BPLib_SQL_LoadBundleImpl(BPLib_Instance_t* Inst, int64_t BundleRowI
     sqlite3*           db;
     BPLib_MEM_Pool_t*  Pool;
 
+    *Bundle    = NULL;
     blob       = NULL;
     BundleHead = NULL;
     CurrBlock  = NULL;
@@ -503,7 +490,7 @@ SQL_Status_t BPLib_SQL_LoadBundleImpl(BPLib_Instance_t* Inst, int64_t BundleRowI
 
     sqlite3_reset(FindBlobStmt);
 
-    SQLStatus = sqlite3_bind_int(FindBlobStmt, 1, BundleRowID);
+    SQLStatus = sqlite3_bind_int64(FindBlobStmt, 1, BundleRowID);
     if (SQLStatus != SQLITE_OK)
     {
         fprintf(stderr, "bind failed: %s\n", sqlite3_errmsg(db));
@@ -549,6 +536,29 @@ SQL_Status_t BPLib_SQL_LoadBundleImpl(BPLib_Instance_t* Inst, int64_t BundleRowI
                 break;
             }
 
+            /* Pool user data may be recycled. Restore persisted fields and give
+             * unavailable contact/origin data deterministic, non-routing defaults. */
+            memset(&BundleHead->user_data.Bundle, 0, sizeof(BPLib_Bundle_t));
+            RetBundle = &BundleHead->user_data.Bundle;
+            sqlite3_int64 StoredBytes = sqlite3_column_int64(FindBlobStmt, 1);
+            sqlite3_int64 Custodial = sqlite3_column_int64(FindBlobStmt, 2);
+            sqlite3_int64 Trigger = sqlite3_column_int64(FindBlobStmt, 3);
+            if (sqlite3_column_type(FindBlobStmt, 1) != SQLITE_INTEGER ||
+                sqlite3_column_type(FindBlobStmt, 2) != SQLITE_INTEGER ||
+                sqlite3_column_type(FindBlobStmt, 3) != SQLITE_INTEGER ||
+                StoredBytes < 0 || (uint64_t)StoredBytes > SIZE_MAX ||
+                (Custodial != 0 && Custodial != 1) || Trigger < 0 || Trigger > UINT32_MAX)
+            {
+                SQLStatus = SQLITE_CORRUPT;
+                sqlite3_blob_close(blob);
+                break;
+            }
+            RetBundle->Meta.TotalBytes = (size_t)StoredBytes;
+            RetBundle->Meta.IsCustodial = Custodial != 0;
+            RetBundle->Meta.RetransmitTime = (uint32_t)Trigger;
+            RetBundle->Meta.IngressID = UINT32_MAX;
+            RetBundle->Meta.EgressID = UINT32_MAX;
+
             /* Load the metadata directly into the mempool block */
             SQLStatus = sqlite3_blob_read(blob, (void*)&(BundleHead->user_data.Bundle.blocks), ChunkSize, 0);
             if (SQLStatus != SQLITE_OK)
@@ -557,6 +567,10 @@ SQL_Status_t BPLib_SQL_LoadBundleImpl(BPLib_Instance_t* Inst, int64_t BundleRowI
                 sqlite3_blob_close(blob);
                 break;
             }
+
+            /* Serialized process addresses cannot own objects in this process.
+             * Keep legacy addresses opaque until the wire chunks are loaded;
+             * reconstruct owned administrative records before returning. */
 
             /* Load succeeded */
             CurrBlock = BundleHead;
@@ -588,7 +602,7 @@ SQL_Status_t BPLib_SQL_LoadBundleImpl(BPLib_Instance_t* Inst, int64_t BundleRowI
             ** will have to create a new database.
             */
             ChunkSize = sqlite3_blob_bytes(blob);
-            if (ChunkSize > BPLIB_MEM_BIG_BLK_DATA_SIZE)
+            if (ChunkSize == 0 || ChunkSize > BPLIB_MEM_BIG_BLK_DATA_SIZE)
             {
                 fprintf(stderr, "Stored BLOB is too large for buffer. DB is corrupted %lu > %lu\n",
                         ChunkSize, BPLIB_MEM_BIG_BLK_DATA_SIZE);
@@ -609,6 +623,13 @@ SQL_Status_t BPLib_SQL_LoadBundleImpl(BPLib_Instance_t* Inst, int64_t BundleRowI
                 break;
             }
 
+            if (LoadedBytes > SIZE_MAX - ChunkSize)
+            {
+                SQLStatus = SQLITE_CORRUPT;
+                sqlite3_blob_close(blob);
+                break;
+            }
+            LoadedBytes += ChunkSize;
             /* Load Succeeded */
             CurrBlock = NextBlock;
             CurrBlock->used_len = ChunkSize;
@@ -626,10 +647,49 @@ SQL_Status_t BPLib_SQL_LoadBundleImpl(BPLib_Instance_t* Inst, int64_t BundleRowI
         ** or an indication that the bundle no longer exists in storage
         */
     }
+    else if (SQLStatus == SQLITE_DONE && (BundleHead->next == NULL ||
+             LoadedBytes != BundleHead->user_data.Bundle.Meta.TotalBytes))
+    {
+        /* Missing wire data or inconsistent persisted byte accounting. */
+        SQLStatus = SQLITE_CORRUPT;
+        BPLib_MEM_BlockListFree(Pool, BundleHead);
+    }
     else if (SQLStatus == SQLITE_DONE)
     { /* Expecting SQLITE_DONE */
         RetBundle       = &(BundleHead->user_data.Bundle);
         RetBundle->blob = BundleHead->next;
+        if (RetBundle->blocks.AdminRecordPayload != NULL)
+        {
+            /* Legacy pointer values are ignored; reconstruct from owned wire. */
+            RetBundle->blocks.AdminRecordPayload = NULL;
+            size_t WireLength = LoadedBytes - sizeof(BPLib_BBlocks_t);
+            unsigned char *Wire = NULL;
+            if (WireLength <= BPLib_NC_GetNodeConfigValue(PARAM_SET_MAX_BUNDLE_LENGTH))
+                Wire = malloc(WireLength);
+            if (Wire == NULL)
+            {
+                BPLib_MEM_BlockListFree(Pool, BundleHead);
+                return WireLength > BPLib_NC_GetNodeConfigValue(PARAM_SET_MAX_BUNDLE_LENGTH) ? SQLITE_CORRUPT : SQLITE_NOMEM;
+            }
+            size_t Offset = 0;
+            for (CurrBlock = RetBundle->blob; CurrBlock != NULL; CurrBlock = CurrBlock->next)
+            {
+                memcpy(Wire + Offset, CurrBlock->user_data.BigData, CurrBlock->used_len);
+                Offset += CurrBlock->used_len;
+            }
+            uint32_t BundleId = RetBundle->blocks.PrimaryBlock.BundleId;
+            BPLib_TIME_MonotonicTime_t ReceiptTime = RetBundle->blocks.PrimaryBlock.MonoTime;
+            memset(&RetBundle->blocks, 0, sizeof(RetBundle->blocks));
+            BPLib_Status_t DecodeStatus = BPLib_CBOR_DecodeBundle(Inst, Wire, WireLength, RetBundle);
+            free(Wire);
+            RetBundle->blocks.PrimaryBlock.BundleId = BundleId;
+            RetBundle->blocks.PrimaryBlock.MonoTime = ReceiptTime;
+            if (DecodeStatus != BPLIB_SUCCESS)
+            {
+                BPLib_MEM_BundleFree(Pool, RetBundle);
+                return DecodeStatus == BPLIB_CBOR_DEC_ADMIN_RECORD_NULL_ERR ? SQLITE_NOMEM : SQLITE_CORRUPT;
+            }
+        }
         *Bundle         = RetBundle;
 
         /* For consistency with other helpers, set status to SQLITE_OK */

@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -94,6 +95,14 @@ BPLib_CT_DbEntry_t *BPLib_CT_GetDbEntryFromIdRbt(const BPLib_RBT_Link_t *Node);
  */
 int BPLib_CT_CompareDbEntries(const BPLib_RBT_Link_t *Node, void *Arg);
 
+/* Index helpers require the caller to hold Ct.Lock (or exclude concurrent use).
+ * InitEntry/AddToCtdb publish CurrDbSize only after their required indexes succeed;
+ * normal allocation/duplicate failures free the attempted entry. AddToCtdb
+ * initializes a transmitted entry in both trees; custody acceptance accounting
+ * (BundleCountInCustody) remains the caller's responsibility.
+ * UpdateEntry preserves sequence fields/state on insertion failure. Lookups clear
+ * their output pointer on failure. These functions do not commit durable SQL.
+ */
 BPLib_Status_t BPLib_CT_AddToCtdb(BPLib_Instance_t *Inst, uint64_t SeqId, 
                                                     uint64_t SeqNum, uint32_t BundleId);
 

@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -28,14 +29,23 @@
 #include "bplib_stor.h"
 #include "bplib_stor_sql.h"
 
+/* Each invocation owns its statements and query text. Callers serialize a
+ * connection; successful counters are published only after transaction commit. */
+typedef struct
+{
+    sqlite3_stmt *Start;
+    sqlite3_stmt *Stop;
+    sqlite3_stmt *Delete;
+} BPLib_SQL_CustodyStatements_t;
+
 BPLib_Status_t BPLib_SQL_SetNewRetransmitTrigger(BPLib_Instance_t *Inst, uint32_t ContactId,
                 BPLib_EID_Pattern_t* DestEIDs, size_t NumEIDs, size_t RetransmitTrigger, size_t *NumUpdated);
 
 SQL_Status_t BPLib_SQL_SetNewRetransmitTriggerImpl(sqlite3* db, BPLib_EID_Pattern_t* DestEIDs, 
-                            size_t NumEIDs, size_t RetransmitTrigger, size_t *NumUpdated);
+                            size_t NumEIDs, size_t RetransmitTrigger, size_t *NumUpdated, sqlite3_stmt *SetRetransmitAllStmt);
 
 BPLib_Status_t BPLib_SQL_UpdateCustodialBundles(BPLib_Instance_t *Inst, BPLib_STOR_CtUpdateBatch_t *Batch);
 
-SQL_Status_t BPLib_SQL_UpdateCustodialBundlesImpl(sqlite3* db, BPLib_STOR_CtUpdateBatch_t *Batch, size_t *NumEgressed);
+SQL_Status_t BPLib_SQL_UpdateCustodialBundlesImpl(sqlite3* db, BPLib_STOR_CtUpdateBatch_t *Batch, size_t *NumEgressed, BPLib_SQL_CustodyStatements_t *Statements);
 
 #endif

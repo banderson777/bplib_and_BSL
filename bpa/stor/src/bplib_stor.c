@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -182,7 +183,7 @@ BPLib_Status_t BPLib_STOR_FlushPendingUnlocked(BPLib_Instance_t* Inst,
 }
 
 
-void BPLib_STOR_UpdateCustodialBundlesUnlocked(BPLib_Instance_t* Inst, BPLib_STOR_CtUpdateBatch_t *CustodyBatch)
+BPLib_Status_t BPLib_STOR_UpdateCustodialBundlesUnlocked(BPLib_Instance_t* Inst, BPLib_STOR_CtUpdateBatch_t *CustodyBatch)
 {
     BPLib_Status_t Status;
 
@@ -194,9 +195,8 @@ void BPLib_STOR_UpdateCustodialBundlesUnlocked(BPLib_Instance_t* Inst, BPLib_STO
                 "Error performing CCS storage operations, Status = %d.", Status);
     }
 
-    CustodyBatch->Size = 0;
-
-    return;
+    if (Status == BPLIB_SUCCESS) CustodyBatch->Size = 0;
+    return Status;
 }
 
 /*
@@ -268,6 +268,7 @@ BPLib_Status_t BPLib_STOR_StoreBundle(BPLib_Instance_t* Inst, BPLib_Bundle_t* Bu
     BPLib_BundleCache_t* CacheInst;
     BPLib_Bundle_t *CustodialBundles[BPLIB_STOR_INSERTBATCHSIZE];
     size_t          CustodialBundlesStored;
+    bool            RejectedCapacity = false;
 
     Status = BPLIB_SUCCESS;
     CustodialBundlesStored = 0;
@@ -281,17 +282,25 @@ BPLib_Status_t BPLib_STOR_StoreBundle(BPLib_Instance_t* Inst, BPLib_Bundle_t* Bu
 
     pthread_mutex_lock(&CacheInst->lock);
 
-    if (Inst->BundleStorage.BytesStorageInUse + Bundle->Meta.TotalBytes >= BPLIB_MAX_STORED_BUNDLE_BYTES)
+    size_t Remaining = CacheInst->BytesStorageInUse < BPLIB_MAX_STORED_BUNDLE_BYTES
+        ? BPLIB_MAX_STORED_BUNDLE_BYTES - CacheInst->BytesStorageInUse : 0;
+    /* Queued bundles have not yet contributed to committed usage. Reserve their
+     * declared sizes before admitting another member of this batch. */
+    for (size_t Index = 0; Index < CacheInst->InsertBatchSize; ++Index)
+    {
+        size_t Pending = CacheInst->InsertBatch[Index]->Meta.TotalBytes;
+        if (Pending >= Remaining) { Remaining = 0; break; }
+        Remaining -= Pending;
+    }
+    if (Bundle->Meta.TotalBytes >= Remaining)
     {
         BPLib_EM_SendEvent(BPLIB_CT_NO_STOR_ERR_EID, BPLib_EM_EventType_ERROR,
-                            "Cannot store and accept bundle, not enough storage (%ld bytes remaining).",
-                            (BPLIB_MAX_STORED_BUNDLE_BYTES - Inst->BundleStorage.BytesStorageInUse));
+                            "Cannot store and accept bundle, not enough storage (%zu bytes remaining).", Remaining);
         BPLib_AS_Increment(BPLIB_EID_INSTANCE, BUNDLE_COUNT_DELETED_NO_STORAGE, 1);
         BPLib_AS_Increment(BPLIB_EID_INSTANCE, BUNDLE_COUNT_DELETED, 1);
         BPLib_AS_Increment(BPLIB_EID_INSTANCE, BUNDLE_COUNT_DISCARDED, 1);
 
-        BPLib_MEM_BundleFree(&(Inst->pool), Bundle);
-
+        RejectedCapacity = true;
         Status = BPLIB_NO_STOR_ERR;
     }
     else
@@ -307,6 +316,15 @@ BPLib_Status_t BPLib_STOR_StoreBundle(BPLib_Instance_t* Inst, BPLib_Bundle_t* Bu
     }
 
     pthread_mutex_unlock(&CacheInst->lock);
+
+    if (RejectedCapacity)
+    {
+        /* Admission may already have created an uncommitted CTDB entry. Release
+         * it so retransmission can retry, without nesting CT under the SQL lock. */
+        if (Bundle->Meta.IsCustodial)
+            (void) BPLib_CT_SignalCustody(Inst, Bundle, BPLib_CT_CustodyRefused, false);
+        BPLib_MEM_BundleFree(&Inst->pool, Bundle);
+    }
 
     /* Finalize custodial signaling for stored bundles */
     if (CustodialBundlesStored > 0)
@@ -454,8 +472,12 @@ BPLib_Status_t BPLib_STOR_EgressForID(BPLib_Instance_t* Inst, uint32_t EgressID,
         /* Mark the batch as egressed */
         Status = BPLib_SQL_MarkBatchEgressed(Inst, LoadBatch, LocalDelivery);
 
-        /* Clear the batch */
-        (void) BPLib_STOR_LoadBatch_Reset(LoadBatch);
+        /* Retain the consumed batch on failure so the next poll retries the
+         * database marking operation without reloading delivered bundles. */
+        if (Status == BPLIB_SUCCESS)
+        {
+            (void) BPLib_STOR_LoadBatch_Reset(LoadBatch);
+        }
     }
     else
     { /* There are bundles in the current batch that need to be egressed */
@@ -544,6 +566,7 @@ bool BPLib_STOR_IsIngressEgressActive(BPLib_Instance_t* Inst)
 BPLib_Status_t BPLib_STOR_GarbageCollect(BPLib_Instance_t* Inst)
 {
     BPLib_Status_t       Status = BPLIB_SUCCESS;
+    BPLib_Status_t       FirstError = BPLIB_SUCCESS;
     BPLib_BundleCache_t* CacheInst;
     size_t               NumDiscarded;
     size_t               NumExpired;
@@ -564,6 +587,14 @@ BPLib_Status_t BPLib_STOR_GarbageCollect(BPLib_Instance_t* Inst)
 
     pthread_mutex_lock(&CacheInst->lock);    
 
+    /* Retry retained custody work even when traffic suppresses garbage collection. */
+    if (CacheInst->CustodyUpdateBatch.Size > 0)
+    {
+        Status = BPLib_STOR_UpdateCustodialBundlesUnlocked(Inst, &CacheInst->CustodyUpdateBatch);
+        if (Status != BPLIB_SUCCESS) FirstError = Status;
+    }
+
+
     if (TriggerCustodialGc || 
        (BPLib_STOR_IsIngressEgressActive(Inst) == false && CacheInst->BundleCountStored != 0))
     {
@@ -577,6 +608,7 @@ BPLib_Status_t BPLib_STOR_GarbageCollect(BPLib_Instance_t* Inst)
         Status = BPLib_SQL_DiscardExpired(Inst, &NumExpired);
         if (Status != BPLIB_SUCCESS)
         {
+            if (FirstError == BPLIB_SUCCESS) FirstError = Status;
             BPLib_EM_SendEvent(BPLIB_STOR_SQL_GC_ERR_EID,
                                 BPLib_EM_EventType_ERROR,
                                 "BPLib_SQL_DiscardExpired failed. RC=%d",
@@ -600,6 +632,7 @@ BPLib_Status_t BPLib_STOR_GarbageCollect(BPLib_Instance_t* Inst)
         Status = BPLib_SQL_DiscardEgressed(Inst, &NumDiscarded);
         if (Status != BPLIB_SUCCESS)
         {
+            if (FirstError == BPLIB_SUCCESS) FirstError = Status;
             BPLib_EM_SendEvent(BPLIB_STOR_SQL_GC_ERR_EID,
                                 BPLib_EM_EventType_ERROR,
                                 "BPLib_SQL_DiscardEgressed failed. RC=%d",
@@ -633,6 +666,7 @@ BPLib_Status_t BPLib_STOR_GarbageCollect(BPLib_Instance_t* Inst)
         }
         else
         {
+            if (FirstError == BPLIB_SUCCESS) FirstError = Status;
             BPLib_EM_SendEvent(BPLIB_STOR_AUTO_CLEAN_ERR_EID, BPLib_EM_EventType_ERROR,
                     "Automatic storage cleanup failed, Error = %d.", Status);              
         }
@@ -646,6 +680,7 @@ BPLib_Status_t BPLib_STOR_GarbageCollect(BPLib_Instance_t* Inst)
     }
     else
     {
+        if (FirstError == BPLIB_SUCCESS) FirstError = Status;
         BPLib_EM_SendEvent(BPLIB_STOR_DB_GET_SIZE_ERR_EID,
                             BPLib_EM_EventType_ERROR,
                             "Error getting database size, RC = %d.",
@@ -654,7 +689,7 @@ BPLib_Status_t BPLib_STOR_GarbageCollect(BPLib_Instance_t* Inst)
 
     pthread_mutex_unlock(&CacheInst->lock);
 
-    return Status;
+    return FirstError;
 }
 
 void BPLib_STOR_UpdateHkPkt(BPLib_Instance_t* Inst)
@@ -699,32 +734,20 @@ BPLib_Status_t BPLib_STOR_Cleanup(BPLib_Instance_t* Inst)
     return Status;
 }
 
-void BPLib_STOR_AddToCustodialUpdateBatch(BPLib_Instance_t *Inst, uint32_t BundleId, 
-                                                                    BPLib_CT_StorOp_t Op)
+BPLib_Status_t BPLib_STOR_AddToCustodialUpdateBatch(BPLib_Instance_t *Inst, uint32_t BundleId,
+                                                   BPLib_CT_StorOp_t Op)
 {
-    BPLib_STOR_CtUpdateBatch_t *CustodyBatch;
+    if (Inst == NULL) return BPLIB_NULL_PTR_ERROR;
+    if (Op != BPLIB_CT_MARK_DELETE && Op != BPLIB_CT_STOP_RETRANSMIT &&
+        Op != BPLIB_CT_START_RETRANSMIT) return BPLIB_STOR_PARAM_ERR;
 
-    if (Inst == NULL || Inst->BundleStorage.CustodyUpdateBatch.Size >= BPLIB_STOR_CT_BATCH_SIZE)
-    {
-        return;
-    }
-
-    pthread_mutex_lock(&(Inst->BundleStorage.lock));
-
-    CustodyBatch = &(Inst->BundleStorage.CustodyUpdateBatch);
-
-    CustodyBatch->BundleIDs[CustodyBatch->Size] = BundleId;
-    CustodyBatch->Ops[CustodyBatch->Size] = Op;
-    CustodyBatch->Size++;
-
-    if (CustodyBatch->Size >= BPLIB_STOR_CT_BATCH_SIZE)
-    {
-        BPLib_STOR_UpdateCustodialBundlesUnlocked(Inst, CustodyBatch);
-    }
-
-    pthread_mutex_unlock(&(Inst->BundleStorage.lock));
-
-    return;
+    /* A CCS may release upstream custody as soon as this returns success.
+     * Commit synchronously: no accepted operation exists only in RAM. */
+    BPLib_STOR_CtUpdateBatch_t Batch = {.Size = 1, .BundleIDs = {BundleId}, .Ops = {Op}};
+    pthread_mutex_lock(&Inst->BundleStorage.lock);
+    BPLib_Status_t Status = BPLib_SQL_UpdateCustodialBundles(Inst, &Batch);
+    pthread_mutex_unlock(&Inst->BundleStorage.lock);
+    return Status;
 }
 
 void BPLib_STOR_UpdateCustodialBundles(BPLib_Instance_t* Inst)

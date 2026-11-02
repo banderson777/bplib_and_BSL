@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -32,11 +33,14 @@
 #include "bplib_inst.h"
 #include "bplib_nc.h"
 #include "bplib_bi.h"
+#include <errno.h>
 
 
 /*
 ** Internal Function Definitions
 */
+
+static BPLib_Status_t BPLib_CT_AssignSeqCounterUnlocked(BPLib_Instance_t *Inst, uint32_t ContactId);
 
 uint8_t BPLib_CT_GetCtebIndex(BPLib_Bundle_t *Bundle)
 {
@@ -199,42 +203,79 @@ BPLib_Status_t BPLib_CT_ProcessNewBundle(BPLib_Instance_t* Inst, BPLib_Bundle_t 
 
     pthread_mutex_lock(&Inst->Ct.Lock);
 
-    /* Reject custody due to lack of storage */
-    /* Check if there's storage left (TotalBytes includes the deserialized bundle) */
-    if (Inst->BundleStorage.BytesStorageInUse + Bundle->Meta.TotalBytes >= BPLIB_MAX_STORED_BUNDLE_BYTES)
+    /* Resolve existing custody before resource refusal: refusing a duplicate
+     * must never remove the already-owned original entry. */
+    BPLib_Status_t LookupStatus = BPLib_CT_GetEntryFromCtdbWithId(&Inst->Ct,
+                                                Bundle->blocks.PrimaryBlock.BundleId, &DbEntry);
+    if (LookupStatus == BPLIB_SUCCESS)
     {
-        BPLib_EM_SendEvent(BPLIB_CT_NO_STOR_ERR_EID, BPLib_EM_EventType_ERROR,
-                            "Cannot process and accept bundle, not enough storage (%ld bytes remaining). %s.",
-                            (BPLIB_MAX_STORED_BUNDLE_BYTES - Inst->BundleStorage.BytesStorageInUse), BundleInfo);
-        BPLib_AS_Increment(BPLIB_EID_INSTANCE, BUNDLE_COUNT_DEPLETED, 1);
-        Status = BPLIB_CT_CUSTODY_REFUSED_ERR;
-    }
-    /* Reject custody when CTDB is full */
-    else if (Inst->Ct.CurrDbSize >= BPLIB_CT_DB_MAX_ENTRIES)
-    {
-        BPLib_EM_SendEvent(BPLIB_CT_NO_MEM_ERR_EID, BPLib_EM_EventType_ERROR,
-                            "Cannot accept bundle, CTDB is full. %s", BundleInfo);
-        BPLib_AS_Increment(BPLIB_EID_INSTANCE, BUNDLE_COUNT_DEPLETED, 1);
-        Status = BPLIB_CT_CUSTODY_REFUSED_ERR;
-    }
-    /* Duplicate bundles are accepted but discarded */
-    else if (BPLib_CT_GetEntryFromCtdbWithId(&(Inst->Ct),
-                    Bundle->blocks.PrimaryBlock.BundleId, &DbEntry) == BPLIB_SUCCESS)
-    {
+        if (DbEntry == NULL)
+        {
+            pthread_mutex_unlock(&Inst->Ct.Lock);
+            return BPLIB_NOT_FOUND_ERR;
+        }
         BPLib_AS_Increment(BPLIB_EID_INSTANCE, BUNDLE_COUNT_REDUNDANT, 1);
         DispCode = BPLib_CT_CustodyAccepted;
         Status = BPLIB_CT_DUPLICATE_ERR;
         StoreBundle = false;
+        if (DbEntry->State == BPLib_CT_Initialized)
+        {
+            /* The original still awaits a durable commit. Keep its entry and
+             * withhold an acknowledgement regardless of resource pressure. */
+            pthread_mutex_unlock(&Inst->Ct.Lock);
+            return Status;
+        }
     }
-
-    /* Custody accepted! */
-    else if (BPLib_PDB_AcceptCustody(Bundle) == BPLIB_SUCCESS)
+    else if (LookupStatus != BPLIB_NOT_FOUND_ERR)
     {
-        DispCode = BPLib_CT_CustodyAccepted;
+        pthread_mutex_unlock(&Inst->Ct.Lock);
+        return LookupStatus;
     }
     else
     {
-        Status = BPLIB_CT_CUSTODY_REFUSED_ERR;
+        /* Advisory snapshot only. Never block under Ct.Lock on storage, whose
+         * cleanup may need Ct.Lock. StoreBundle rechecks under its own lock. */
+        size_t StorageUsed = 0;
+        int LockStatus = pthread_mutex_trylock(&Inst->BundleStorage.lock);
+        if (LockStatus == 0)
+        {
+            StorageUsed = Inst->BundleStorage.BytesStorageInUse;
+            pthread_mutex_unlock(&Inst->BundleStorage.lock);
+        }
+        else if (LockStatus != EBUSY)
+        {
+            pthread_mutex_unlock(&Inst->Ct.Lock);
+            return BPLIB_ERROR;
+        }
+        /* Subtract only after checking usage, preserving the existing exact-limit
+         * refusal policy without allowing a size_t addition to wrap. */
+        if (StorageUsed >= BPLIB_MAX_STORED_BUNDLE_BYTES ||
+                 Bundle->Meta.TotalBytes >= BPLIB_MAX_STORED_BUNDLE_BYTES - StorageUsed)
+        {
+            size_t Remaining = StorageUsed < BPLIB_MAX_STORED_BUNDLE_BYTES
+                ? BPLIB_MAX_STORED_BUNDLE_BYTES - StorageUsed : 0;
+            BPLib_EM_SendEvent(BPLIB_CT_NO_STOR_ERR_EID, BPLib_EM_EventType_ERROR,
+                                "Cannot process and accept bundle, not enough storage (%zu bytes remaining). %s.",
+                                Remaining, BundleInfo);
+            BPLib_AS_Increment(BPLIB_EID_INSTANCE, BUNDLE_COUNT_DEPLETED, 1);
+            Status = BPLIB_CT_CUSTODY_REFUSED_ERR;
+        }
+        else if (Inst->Ct.CurrDbSize >= BPLIB_CT_DB_MAX_ENTRIES)
+        {
+            BPLib_EM_SendEvent(BPLIB_CT_NO_MEM_ERR_EID, BPLib_EM_EventType_ERROR,
+                                "Cannot accept bundle, CTDB is full. %s", BundleInfo);
+            BPLib_AS_Increment(BPLIB_EID_INSTANCE, BUNDLE_COUNT_DEPLETED, 1);
+            Status = BPLIB_CT_CUSTODY_REFUSED_ERR;
+        }
+        /* Custody accepted! */
+        else if (BPLib_PDB_AcceptCustody(Bundle) == BPLIB_SUCCESS)
+        {
+            DispCode = BPLib_CT_CustodyAccepted;
+        }
+        else
+        {
+            Status = BPLIB_CT_CUSTODY_REFUSED_ERR;
+        }
     }
 
     if (Status == BPLIB_SUCCESS)
@@ -321,15 +362,15 @@ BPLib_Status_t BPLib_CT_UpdateBundle(BPLib_Instance_t* Inst, BPLib_Bundle_t *Bun
     
     Status = BPLib_CT_GetEntryFromCtdbWithId(&(Inst->Ct),
                         Bundle->blocks.PrimaryBlock.BundleId, &DbEntry);
+    if (Status == BPLIB_SUCCESS && DbEntry == NULL) Status = BPLIB_NOT_FOUND_ERR;
     if (Status != BPLIB_SUCCESS)
     {
         /* 
         ** Possible causes of this:
         **  - The CTDB has been corrupted -> unlikely and if this is the case,
         **    nothing we can really do
-        **  - The node was restarted with custodial bundles in storage -> possible,
-        **    but not a case that can currently be handled, this will require
-        **    logic to rebuild the CTDB on a node restart
+        **  - The node restarted without a mission-specific rebuild of pending
+        **    custody entries from durable storage
         **  - Some mismatch in the threads where this bundle was loaded into
         **    memory in a retransmission right before a CCS confirms its
         **    retransmission and deletes the bundle from the CTDB -> possible, 
@@ -342,8 +383,8 @@ BPLib_Status_t BPLib_CT_UpdateBundle(BPLib_Instance_t* Inst, BPLib_Bundle_t *Bun
         if (DbEntry->State == BPLib_CT_Initialized)
         {
             BPLib_EM_SendEvent(BPLIB_CT_NONCUSTODIAL_ERR_EID, BPLib_EM_EventType_ERROR,
-                    "Error, cannot update a custodial bundle whose custody has not been finalized; seq_num = %ld", 
-                    DbEntry->State, DbEntry->SeqNum);
+                    "Error, cannot update a custodial bundle whose custody has not been finalized; state = %d, seq_num = %llu",
+                    (int)DbEntry->State, (unsigned long long)DbEntry->SeqNum);
             Status = BPLIB_CT_CUSTODY_REFUSED_ERR;
         }
         else if (DbEntry->State == BPLib_CT_Transferred)
@@ -358,13 +399,22 @@ BPLib_Status_t BPLib_CT_UpdateBundle(BPLib_Instance_t* Inst, BPLib_Bundle_t *Bun
         /* Bundle CTEB fields have not been updated yet, assign new values */
         else if (DbEntry->State == BPLib_CT_InCustody)
         {
-            CtebPtr->BundleSeqId = BPLib_CT_GetSequenceId(&(Inst->Ct), Bundle->Meta.EgressID);;
-            CtebPtr->BundleSeqNum = BPLib_CT_GetNextSequenceNum(&(Inst->Ct), Bundle->Meta.EgressID);
-
-            DbEntry->State = BPLib_CT_Transmitted;
-
-            Status = BPLib_CT_UpdateEntry(Inst, DbEntry, CtebPtr->BundleSeqId,
-                                                            CtebPtr->BundleSeqNum);
+            /* Reserve a fresh stream before the old counter could wrap to zero.
+             * MAX is left unused locally; inbound MAX remains supported. */
+            if (Inst->Ct.SeqCounters[Bundle->Meta.EgressID].Counter == UINT64_MAX)
+                Status = BPLib_CT_AssignSeqCounterUnlocked(Inst, Bundle->Meta.EgressID);
+            if (Status == BPLIB_SUCCESS)
+            {
+                uint64_t SeqId = BPLib_CT_GetSequenceId(&Inst->Ct, Bundle->Meta.EgressID);
+                uint64_t SeqNum = BPLib_CT_GetNextSequenceNum(&Inst->Ct, Bundle->Meta.EgressID);
+                Status = BPLib_CT_UpdateEntry(Inst, DbEntry, SeqId, SeqNum);
+                if (Status == BPLIB_SUCCESS)
+                {
+                    CtebPtr->BundleSeqId = SeqId;
+                    CtebPtr->BundleSeqNum = SeqNum;
+                    DbEntry->State = BPLib_CT_Transmitted;
+                }
+            }
         }
         
         /* Bundle CTEB fields have been set, this is a retransmission */
@@ -378,8 +428,11 @@ BPLib_Status_t BPLib_CT_UpdateBundle(BPLib_Instance_t* Inst, BPLib_Bundle_t *Bun
             BPLib_AS_Increment(BPLIB_EID_INSTANCE, BUNDLE_COUNT_CUSTODY_RE_FORWARDED, 1);
         }
 
-        BPLib_EID_CopyEids(&(CtebPtr->BlockSrcAdminEID), BPLIB_EID_INSTANCE);
-        Bundle->blocks.ExtBlocks[ExtBlockIdx].Header.RequiresEncode = true;
+        if (Status == BPLIB_SUCCESS)
+        {
+            BPLib_EID_CopyEids(&(CtebPtr->BlockSrcAdminEID), BPLIB_EID_INSTANCE);
+            Bundle->blocks.ExtBlocks[ExtBlockIdx].Header.RequiresEncode = true;
+        }
     }
 
     pthread_mutex_unlock(&Inst->Ct.Lock);
@@ -422,35 +475,40 @@ BPLib_Status_t BPLib_CT_ProcessCcs(BPLib_Instance_t *Inst, BPLib_CT_Deserialized
         }
     }
 
-    pthread_mutex_unlock(&Inst->Ct.Lock);
-
     return Status;
+}
+
+/* Caller holds Ct.Lock; callback failure leaves the current stream untouched. */
+static BPLib_Status_t BPLib_CT_AssignSeqCounterUnlocked(BPLib_Instance_t *Inst, uint32_t ContactId)
+{
+    uint64_t Id = 0;
+    if (Inst->Ct.AllocateSequenceId != NULL)
+    {
+        BPLib_Status_t Status = Inst->Ct.AllocateSequenceId(&Id);
+        if (Status != BPLIB_SUCCESS) return Status;
+        if (Id == 0 || Id == BPLIB_CT_SEQ_ID_ROLLOVER_VALUE ||
+            Id == Inst->Ct.SeqCounters[ContactId].Id) return BPLIB_INVALID_CONFIG_ERR;
+    }
+    else
+    {
+        if (Inst->Ct.LastSeqCounterId == UINT64_MAX) return BPLIB_INVALID_CONFIG_ERR;
+        Id = Inst->Ct.LastSeqCounterId + 1;
+        if (Id == BPLIB_CT_SEQ_ID_ROLLOVER_VALUE) ++Id;
+        Inst->Ct.LastSeqCounterId = Id;
+    }
+    Inst->Ct.SeqCounters[ContactId].Id = Id;
+    Inst->Ct.SeqCounters[ContactId].Counter = 0;
+    return BPLIB_SUCCESS;
 }
 
 BPLib_Status_t BPLib_CT_AssignSeqCounter(BPLib_Instance_t *Inst, uint32_t ContactId)
 {
-    if (Inst == NULL)
-    {
-        return BPLIB_NULL_PTR_ERROR;
-    }
-
-    if (ContactId >= BPLIB_MAX_NUM_CONTACTS)
-    {
-        return BPLIB_INVALID_CONT_ID_ERR;
-    }
-
-    Inst->Ct.LastSeqCounterId++;
-
-    if (Inst->Ct.LastSeqCounterId == BPLIB_CT_SEQ_ID_ROLLOVER_VALUE)
-    {
-        /* Sequence ID of 0 is reserved */
-        Inst->Ct.LastSeqCounterId = 1;
-    }
-
-    Inst->Ct.SeqCounters[ContactId].Id = Inst->Ct.LastSeqCounterId;
-    Inst->Ct.SeqCounters[ContactId].Counter = 0;
-
-    return BPLIB_SUCCESS;
+    if (Inst == NULL) return BPLIB_NULL_PTR_ERROR;
+    if (ContactId >= BPLIB_MAX_NUM_CONTACTS) return BPLIB_INVALID_CONT_ID_ERR;
+    pthread_mutex_lock(&Inst->Ct.Lock);
+    BPLib_Status_t Status = BPLib_CT_AssignSeqCounterUnlocked(Inst, ContactId);
+    pthread_mutex_unlock(&Inst->Ct.Lock);
+    return Status;
 }
 
 void BPLib_CT_DeleteBundleFromCtdb(BPLib_Instance_t *Inst, uint32_t BundleId)

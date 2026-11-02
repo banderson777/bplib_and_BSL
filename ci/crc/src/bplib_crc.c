@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -40,13 +41,25 @@ static uint16_t BPLIB_CRC16_X25_TABLE[256];
 static uint32_t BPLIB_CRC32_C_TABLE[256];
 
 
+/* Match the generic callback exactly; widen the native digest result through
+ * a normal C return conversion rather than an incompatible function call. */
+static BPLib_CRC_Val_t BPLib_CRC_Digest16(const void *Data, size_t DataLen)
+{
+    return BPLib_CRC_GetCrc16X25(Data, DataLen);
+}
+
+static BPLib_CRC_Val_t BPLib_CRC_Digest32(const void *Data, size_t DataLen)
+{
+    return BPLib_CRC_GetCrc32Castagnoli(Data, DataLen);
+}
+
 /*
  * Global definition of CRC-16/X.25 algorithm
  */
 BPLib_CRC_Parameters_t BPLIB_CRC16_X25 = {
             .Length              = 16,
             .ShouldReflectOutput = true,
-            .Digest              = (BPLib_CRC_DigestFunc_t) BPLib_CRC_GetCrc16X25,
+            .Digest              = BPLib_CRC_Digest16,
             .FinalXor            = 0xFFFF
 };
 
@@ -56,7 +69,7 @@ BPLib_CRC_Parameters_t BPLIB_CRC16_X25 = {
 BPLib_CRC_Parameters_t BPLIB_CRC32_CASTAGNOLI = {
             .Length              = 32,
             .ShouldReflectOutput = true,
-            .Digest              = (BPLib_CRC_DigestFunc_t) BPLib_CRC_GetCrc32Castagnoli,
+            .Digest              = BPLib_CRC_Digest32,
             .FinalXor            = 0xFFFFFFFF
 };
 

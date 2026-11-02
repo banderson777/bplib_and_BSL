@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -461,8 +462,11 @@ BPLib_Status_t BPLib_QCBOR_BundleSeqCollectionParserImpl(QCBORDecodeContext* ctx
     BPLib_Status_t Status;
     QCBORItem      MapItem;
     uint64_t       SeqRangeIdx;
-    uint8_t        DispositionIdx;
+    size_t         DispositionIdx;
+    size_t         NumCollections;
 
+    if (NumSeqCollections == NULL) return BPLIB_NULL_PTR_ERROR;
+    *NumSeqCollections = 0;
     if ((ctx == NULL) || (Parsed == NULL))
     {
         return BPLIB_NULL_PTR_ERROR;
@@ -481,9 +485,9 @@ BPLib_Status_t BPLib_QCBOR_BundleSeqCollectionParserImpl(QCBORDecodeContext* ctx
         return BPLIB_CBOR_DEC_TYPES_BNDL_SEQ_MAP_SIZE_ERR;
     }
 
-    *NumSeqCollections = MapItem.val.uCount;
+    NumCollections = MapItem.val.uCount;
 
-    for (DispositionIdx = 0; DispositionIdx < *NumSeqCollections; DispositionIdx++)
+    for (DispositionIdx = 0; DispositionIdx < NumCollections; DispositionIdx++)
     {
         Status = BPLib_QCBOR_EnterDefiniteArray(ctx, &MapItem);
         if (Status != BPLIB_SUCCESS)
@@ -494,7 +498,11 @@ BPLib_Status_t BPLib_QCBOR_BundleSeqCollectionParserImpl(QCBORDecodeContext* ctx
         memset((void*) &Parsed[DispositionIdx], 0, sizeof(BPLib_CT_BundleSeqCollection_t));
 
         /* === Set DispositionCode === */
+        if (MapItem.uLabelType != QCBOR_TYPE_INT64 || MapItem.label.int64 == 0)
+            return BPLIB_CBOR_DEC_INV_DISP_CODE_ERR;
         Parsed[DispositionIdx].DispositionCode = (BPLib_CT_DispositionCode_t) MapItem.label.int64;
+        if ((int64_t)Parsed[DispositionIdx].DispositionCode != MapItem.label.int64)
+            return BPLIB_CBOR_DEC_INV_DISP_CODE_ERR;
 
         /* Disposition codes can be negative or positive but not 0 */
         if (Parsed[DispositionIdx].DispositionCode == 0)
@@ -563,5 +571,6 @@ BPLib_Status_t BPLib_QCBOR_BundleSeqCollectionParserImpl(QCBORDecodeContext* ctx
         return BPLIB_CBOR_DEC_TYPES_BNDL_SEQ_EXIT_MAP_ERR;
     }
 
+    *NumSeqCollections = NumCollections;
     return BPLIB_SUCCESS;
 }

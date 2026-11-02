@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -34,13 +35,15 @@ BPLib_StorageHkTlm_Payload_t BPLib_STOR_StoragePayload;
  * Generated stub function for BPLib_STOR_AddToCustodialUpdateBatch()
  * ----------------------------------------------------
  */
-void BPLib_STOR_AddToCustodialUpdateBatch(BPLib_Instance_t *Inst, uint32_t BundleId, BPLib_CT_StorOp_t Op)
+BPLib_Status_t BPLib_STOR_AddToCustodialUpdateBatch(BPLib_Instance_t *Inst, uint32_t BundleId, BPLib_CT_StorOp_t Op)
 {
     UT_GenStub_AddParam(BPLib_STOR_AddToCustodialUpdateBatch, BPLib_Instance_t *, Inst);
     UT_GenStub_AddParam(BPLib_STOR_AddToCustodialUpdateBatch, uint32_t, BundleId);
     UT_GenStub_AddParam(BPLib_STOR_AddToCustodialUpdateBatch, BPLib_CT_StorOp_t, Op);
 
+    UT_GenStub_SetupReturnBuffer(BPLib_STOR_AddToCustodialUpdateBatch, BPLib_Status_t);
     UT_GenStub_Execute(BPLib_STOR_AddToCustodialUpdateBatch, Basic, NULL);
+    return UT_GenStub_GetReturnValue(BPLib_STOR_AddToCustodialUpdateBatch, BPLib_Status_t);
 }
 
 /*

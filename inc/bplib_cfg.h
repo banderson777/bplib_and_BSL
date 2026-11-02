@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -75,7 +76,8 @@ extern "C" {
 /** 
  * \brief Maximum number of extension blocks per bundle.
  */
-#define BPLIB_MAX_NUM_EXTENSION_BLOCKS          4
+/* Reserve room for the four BPNode-managed blocks plus one BPSec block. */
+#define BPLIB_MAX_NUM_EXTENSION_BLOCKS          5
 
 /**
  * \brief Maximum number of canonical blocks per bundle

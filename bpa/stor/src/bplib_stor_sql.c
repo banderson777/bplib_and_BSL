@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -31,18 +32,18 @@
 #include <stdio.h>
 #include <pthread.h>
 
+/* Bound transient contention from read-only monitors and other connections.
+ * Missions may override this at compile time; no lock is waited on forever. */
+#ifndef BPLIB_SQL_BUSY_TIMEOUT_MSEC
+#define BPLIB_SQL_BUSY_TIMEOUT_MSEC 1000
+#endif
+
 /* ======= */
 /* Globals */
 /* ======= */
 
 /* SQL query statements */
 
-sqlite3_stmt* GetNumBundlesStmt;
-sqlite3_stmt* GetNumEgressedStmt;
-sqlite3_stmt* TotalBytesStmt;
-sqlite3_stmt* GetExpiredStmt;
-sqlite3_stmt* DeleteBundleStmt;
-sqlite3_stmt* GetEgressedStmt;
 
 /* SQL query strings */
 
@@ -101,6 +102,15 @@ const char* CreateTableSQL =
 "    FOREIGN KEY (bundle_row) REFERENCES bundle_data(id) ON DELETE CASCADE\n"
 ");\n"
 "\n"
+"CREATE TABLE IF NOT EXISTS bundle_recovery (\n"
+"    bundle_row INTEGER PRIMARY KEY REFERENCES bundle_data(id) ON DELETE CASCADE,\n"
+"    format INTEGER NOT NULL CHECK(format=2),\n"
+"    ingress_id INTEGER NOT NULL CHECK(ingress_id BETWEEN 0 AND 4294967295),\n"
+"    local_bundle INTEGER NOT NULL CHECK(local_bundle IN (0,1)),\n"
+"    wire_bytes INTEGER NOT NULL CHECK(wire_bytes>0),\n"
+"    receipt_time INTEGER NOT NULL CHECK(receipt_time>=0),\n"
+"    receipt_era INTEGER NOT NULL CHECK(receipt_era BETWEEN 0 AND 4294967295)\n"
+");\n"
 "CREATE INDEX IF NOT EXISTS idx_bundle_blobs ON bundle_blobs (bundle_row);\n"
 "CREATE INDEX IF NOT EXISTS idx_action_timestamp ON bundle_data (action_timestamp);\n"
 #if BPLIB_ALLOW_DUPLICATE_BUNDLES == false
@@ -136,6 +146,20 @@ const char* TotalBytesSQL =
 "AS TotalBytes "
 "FROM bundle_data;";
 
+/* Validated helper queries keep the exported raw SQL text compatible. */
+static const char GetNumBundlesAccountingSQL[] =
+"SELECT COUNT(*), 0 FROM bundle_data;";
+
+static const char GetNumEgressedAccountingSQL[] =
+"SELECT COUNT(CASE WHEN egress_attempted=1 THEN 1 END), "
+"COUNT(CASE WHEN typeof(egress_attempted)!='integer' OR egress_attempted NOT IN (0,1) THEN 1 END) "
+"FROM bundle_data;";
+
+static const char TotalBytesAccountingSQL[] =
+"SELECT COALESCE(SUM(bundle_bytes),0), "
+"COUNT(CASE WHEN typeof(bundle_bytes)!='integer' OR bundle_bytes<0 THEN 1 END) "
+"FROM bundle_data;";
+
 const char* GetExpiredSQL = 
 "SELECT id, bundle_bytes, bundle_id, is_custodial FROM bundle_data "
 "WHERE (action_timestamp < ?) AND (egress_attempted = 0) "
@@ -167,6 +191,12 @@ SQL_Status_t BPLib_SQL_InitDb(const char* DbName, sqlite3** ActiveDbPtr)
 
     ActiveDb = *ActiveDbPtr;
 
+    SQLStatus = sqlite3_busy_timeout(ActiveDb, BPLIB_SQL_BUSY_TIMEOUT_MSEC);
+    if (SQLStatus != SQLITE_OK)
+    {
+        return SQLStatus;
+    }
+
     /* Set the atomic commit and rollback method to write-ahead log */
     SQLStatus = sqlite3_exec(ActiveDb, "PRAGMA journal_mode=WAL;", 0, 0, NULL);
     if (SQLStatus != SQLITE_OK)
@@ -181,8 +211,8 @@ SQL_Status_t BPLib_SQL_InitDb(const char* DbName, sqlite3** ActiveDbPtr)
         return SQLStatus;
     }
 
-    /* Disable synchronization */
-    SQLStatus = sqlite3_exec(ActiveDb, "PRAGMA synchronous=OFF;", 0, 0, NULL);
+    /* Custody acceptance follows commit: keep WAL commits durable. */
+    SQLStatus = sqlite3_exec(ActiveDb, "PRAGMA synchronous=FULL;", 0, 0, NULL);
     if (SQLStatus != SQLITE_OK)
     {
         return SQLStatus;
@@ -224,47 +254,54 @@ SQL_Status_t BPLib_SQL_InitDb(const char* DbName, sqlite3** ActiveDbPtr)
 
 SQL_Status_t BPLib_SQL_InitTable(BPLib_Instance_t* Inst)
 {
-    SQL_Status_t SQLStatus;
-    uint32_t     NumStoredBundles;
-    uint64_t     TotalBundleBytes;
-    size_t       NumEgressed;
-
-    NumStoredBundles = 0;
-    TotalBundleBytes = 0;
-    NumEgressed      = 0;
-
-    /* Create the table if it doesn't already exist */
-    SQLStatus = sqlite3_exec(Inst->BundleStorage.db, CreateTableSQL, 0, 0, NULL);
-    if (SQLStatus != SQLITE_OK)
+    /* One SELECT observes a consistent accounting snapshot. Reject malformed
+     * metadata rather than letting SUM coercion or unsigned conversion hide it. */
+    const char *AccountingSQL =
+        "SELECT COUNT(*), COUNT(CASE WHEN egress_attempted=1 THEN 1 END), "
+        "COALESCE(SUM(bundle_bytes),0), "
+        "COUNT(CASE WHEN typeof(bundle_bytes)!='integer' OR bundle_bytes<0 OR "
+        "typeof(egress_attempted)!='integer' OR egress_attempted NOT IN (0,1) THEN 1 END) "
+        "FROM bundle_data;";
+    sqlite3_stmt *Accounting = NULL;
+    sqlite3_int64 Values[4] = {0};
+    SQL_Status_t Status = sqlite3_exec(Inst->BundleStorage.db, CreateTableSQL, 0, 0, NULL);
+    if (Status != SQLITE_OK) return Status;
+    Status = sqlite3_prepare_v2(Inst->BundleStorage.db, AccountingSQL, -1, &Accounting, NULL);
+    if (Status == SQLITE_OK)
     {
-        return SQLStatus;
+        Status = sqlite3_step(Accounting);
+        if (Status == SQLITE_ROW)
+        {
+            Status = SQLITE_OK;
+            for (size_t i = 0; i < 4; ++i)
+            {
+                if (sqlite3_column_type(Accounting, i) != SQLITE_INTEGER ||
+                    (Values[i] = sqlite3_column_int64(Accounting, i)) < 0)
+                { Status = SQLITE_CORRUPT; break; }
+            }
+            if (Status == SQLITE_OK && (Values[3] != 0 || Values[1] > Values[0]))
+                Status = SQLITE_CORRUPT;
+            if (Status == SQLITE_OK && ((uint64_t)Values[0] > UINT32_MAX ||
+                                       (uint64_t)Values[2] > SIZE_MAX))
+                Status = SQLITE_TOOBIG;
+            if (Status == SQLITE_OK)
+            {
+                Status = sqlite3_step(Accounting);
+                Status = Status == SQLITE_DONE ? SQLITE_OK :
+                         Status == SQLITE_ROW ? SQLITE_CORRUPT : Status;
+            }
+        }
+        else if (Status == SQLITE_DONE) Status = SQLITE_CORRUPT;
     }
+    int FinalStatus = sqlite3_finalize(Accounting);
+    if (Status == SQLITE_OK) Status = FinalStatus;
+    if (Status != SQLITE_OK) return Status;
 
-    /* Determine how many bundles are presently in storage, and set the stored counter to this value */
-    SQLStatus = BPLib_SQL_GetNumStoredBundles(Inst->BundleStorage.db, &NumStoredBundles);
-    if (SQLStatus != SQLITE_OK)
-    {
-        return SQLStatus;
-    }
-    
-    Inst->BundleStorage.BundleCountStored = NumStoredBundles;
-
-    SQLStatus = BPLib_SQL_GetNumEgressed(Inst->BundleStorage.db, &NumEgressed);
-    if (SQLStatus != SQLITE_OK)
-    {
-        return SQLStatus;
-    }
-
-    Inst->BundleStorage.BundleCountNotEgressed = NumStoredBundles - NumEgressed;
-
-    /* Find the total number of bytes of bundles stored */
-    SQLStatus = BPLib_SQL_GetTotalBundleBytes(Inst->BundleStorage.db, &TotalBundleBytes);
-    if (SQLStatus == SQLITE_OK)
-    {
-        Inst->BundleStorage.BytesStorageInUse = TotalBundleBytes;
-    }
-
-    return SQLStatus;
+    /* Publish together only after the read and cleanup have succeeded. */
+    Inst->BundleStorage.BundleCountStored = (uint32_t)Values[0];
+    Inst->BundleStorage.BundleCountNotEgressed = (size_t)(Values[0] - Values[1]);
+    Inst->BundleStorage.BytesStorageInUse = (size_t)Values[2];
+    return SQLITE_OK;
 }
 
 BPLib_Status_t BPLib_SQL_Init(BPLib_Instance_t* Inst, const char* DbName)
@@ -272,6 +309,7 @@ BPLib_Status_t BPLib_SQL_Init(BPLib_Instance_t* Inst, const char* DbName)
     BPLib_Status_t Status;
     SQL_Status_t   SQLStatus;
 
+    if (Inst == NULL || DbName == NULL) return BPLIB_NULL_PTR_ERROR;
     Status = BPLIB_SUCCESS;
 
     SQLStatus = BPLib_SQL_InitDb(DbName, &Inst->BundleStorage.db);
@@ -282,419 +320,255 @@ BPLib_Status_t BPLib_SQL_Init(BPLib_Instance_t* Inst, const char* DbName)
 
     if (SQLStatus != SQLITE_OK)
     {
+        fprintf(stderr, "Storage SQL initialization failed (%d): %s\n", SQLStatus,
+                Inst->BundleStorage.db ? sqlite3_errmsg(Inst->BundleStorage.db) : "no database handle");
+        if (Inst->BundleStorage.db != NULL)
+        {
+            sqlite3_close(Inst->BundleStorage.db);
+            Inst->BundleStorage.db = NULL;
+        }
         Status = BPLIB_STOR_SQL_INIT_ERR;
     }
 
     return Status;
 }
 
+/* Query returns a value and the number of malformed input rows. Each public
+ * helper preserves the caller's result unless validation and cleanup succeed. */
+static int BPLib_SQL_ReadAccountingValue(sqlite3 *db, const char *Query,
+                                       uint64_t Maximum, uint64_t *Result)
+{
+    if (db == NULL || Query == NULL || Result == NULL) return SQLITE_MISUSE;
+    sqlite3_stmt *Statement = NULL;
+    sqlite3_int64 Value = 0;
+    int Status = sqlite3_prepare_v2(db, Query, -1, &Statement, NULL);
+    if (Status == SQLITE_OK)
+    {
+        Status = sqlite3_step(Statement);
+        if (Status == SQLITE_ROW)
+        {
+            if (sqlite3_column_count(Statement) != 2 ||
+                sqlite3_column_type(Statement, 0) != SQLITE_INTEGER ||
+                sqlite3_column_type(Statement, 1) != SQLITE_INTEGER ||
+                (Value = sqlite3_column_int64(Statement, 0)) < 0 ||
+                sqlite3_column_int64(Statement, 1) != 0)
+                Status = SQLITE_CORRUPT;
+            else if ((uint64_t)Value > Maximum) Status = SQLITE_TOOBIG;
+            else
+            {
+                Status = sqlite3_step(Statement);
+                Status = Status == SQLITE_DONE ? SQLITE_OK :
+                         Status == SQLITE_ROW ? SQLITE_CORRUPT : Status;
+            }
+        }
+        else if (Status == SQLITE_DONE) Status = SQLITE_CORRUPT;
+    }
+    int FinalStatus = sqlite3_finalize(Statement);
+    if (Status == SQLITE_OK) Status = FinalStatus;
+    if (Status == SQLITE_OK) *Result = (uint64_t)Value;
+    else if (Status == SQLITE_CORRUPT || Status == SQLITE_TOOBIG)
+        fprintf(stderr, "Invalid storage accounting value (%d)\n", Status);
+    else fprintf(stderr, "Storage accounting query failed (%d): %s\n", Status, sqlite3_errmsg(db));
+    return Status;
+}
+
 SQL_Status_t BPLib_SQL_GetNumStoredBundles(sqlite3 *db, uint32_t *BundleCnt)
 {
-    SQL_Status_t SQLStatus;
-
-    SQLStatus = sqlite3_prepare_v2(db, GetNumBundlesSQL, -1, &GetNumBundlesStmt, NULL);
-    if (SQLStatus != SQLITE_OK)
-    {
-        fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
-        return SQLStatus;
-    }
-
-    SQLStatus = sqlite3_step(GetNumBundlesStmt);
-    if (SQLStatus != SQLITE_ROW)
-    {
-        return SQLStatus;
-    }
-
-    *BundleCnt = sqlite3_column_int(GetNumBundlesStmt, 0);
-
-    sqlite3_finalize(GetNumBundlesStmt);
-
-    return SQLITE_OK;
+    if (BundleCnt == NULL) return SQLITE_MISUSE;
+    uint64_t Result = 0;
+    int Status = BPLib_SQL_ReadAccountingValue(db, GetNumBundlesAccountingSQL, UINT32_MAX, &Result);
+    if (Status == SQLITE_OK) *BundleCnt = (uint32_t)Result;
+    return Status;
 }
 
-SQL_Status_t BPLib_SQL_GetNumEgressed(sqlite3* db, size_t *EgressCnt)
+SQL_Status_t BPLib_SQL_GetNumEgressed(sqlite3 *db, size_t *EgressCnt)
 {
-    SQL_Status_t SQLStatus;
-
-    SQLStatus = sqlite3_prepare_v2(db, GetNumEgressedSQL, -1, &GetNumEgressedStmt, NULL);
-    if (SQLStatus != SQLITE_OK)
-    {
-        fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
-        return SQLStatus;
-    }
-
-    SQLStatus = sqlite3_step(GetNumEgressedStmt);
-    if (SQLStatus != SQLITE_ROW)
-    {
-        return SQLStatus;
-    }
-
-    *EgressCnt = sqlite3_column_int(GetNumEgressedStmt, 0);
-
-    sqlite3_finalize(GetNumEgressedStmt);
-    
-    return SQLITE_OK;
+    if (EgressCnt == NULL) return SQLITE_MISUSE;
+    uint64_t Result = 0;
+    int Status = BPLib_SQL_ReadAccountingValue(db, GetNumEgressedAccountingSQL, SIZE_MAX, &Result);
+    if (Status == SQLITE_OK) *EgressCnt = (size_t)Result;
+    return Status;
 }
 
-SQL_Status_t BPLib_SQL_GetTotalBundleBytes(sqlite3* db, uint64_t* TotalBytes)
+SQL_Status_t BPLib_SQL_GetTotalBundleBytes(sqlite3 *db, uint64_t *TotalBytes)
 {
-    SQL_Status_t SQLStatus;
+    if (TotalBytes == NULL) return SQLITE_MISUSE;
+    uint64_t Result = 0;
+    int Status = BPLib_SQL_ReadAccountingValue(db, TotalBytesAccountingSQL, UINT64_MAX, &Result);
+    if (Status == SQLITE_OK) *TotalBytes = Result;
+    return Status;
+}
 
-    /* Load up the SQL command */
-    SQLStatus = sqlite3_prepare_v2(db, TotalBytesSQL, -1, &TotalBytesStmt, NULL);
-    if (SQLStatus == SQLITE_OK)
+/* Read one integer PRAGMA without publishing a partial result. */
+static int BPLib_SQL_ReadSizePragma(sqlite3 *db, const char *Query, sqlite3_int64 *Value)
+{
+    sqlite3_stmt *Statement = NULL;
+    int Status = sqlite3_prepare_v2(db, Query, -1, &Statement, NULL);
+    sqlite3_int64 Result = 0;
+    if (Status == SQLITE_OK)
     {
-        /* Evaluate the command */
-        SQLStatus = sqlite3_step(TotalBytesStmt);
-        if (SQLStatus == SQLITE_ROW)
+        Status = sqlite3_step(Statement);
+        if (Status == SQLITE_ROW)
         {
-            /* Assign the result of the query to TotalBytes */
-            *TotalBytes = sqlite3_column_int64(TotalBytesStmt, 0);
-            sqlite3_finalize(TotalBytesStmt);
-
-            /* Set the status to a success value */
-            SQLStatus = SQLITE_OK;
+            if (sqlite3_column_type(Statement, 0) != SQLITE_INTEGER ||
+                (Result = sqlite3_column_int64(Statement, 0)) < 0)
+                Status = SQLITE_CORRUPT;
+            else
+            {
+                Status = sqlite3_step(Statement);
+                Status = Status == SQLITE_DONE ? SQLITE_OK :
+                         Status == SQLITE_ROW ? SQLITE_CORRUPT : Status;
+            }
         }
-        else
-        {
-            fprintf(stderr, "Error code %s received while evaluating the SQL statement: %s\n",
-                    sqlite3_errmsg(db),
-                    TotalBytesSQL);
-        }
+        else if (Status == SQLITE_DONE) Status = SQLITE_CORRUPT;
     }
-    else
-    {
-        fprintf(stderr, "Error code %s, received while preparing SQL statement: %s\n",
-                sqlite3_errmsg(db),
-                TotalBytesSQL);
-    }
-
-    return SQLStatus;
+    int FinalStatus = sqlite3_finalize(Statement);
+    if (Status == SQLITE_OK) Status = FinalStatus;
+    if (Status == SQLITE_OK) *Value = Result;
+    return Status;
 }
 
 BPLib_Status_t BPLib_SQL_GetDbSize(BPLib_Instance_t *Inst, size_t *DbSize)
 {
-    SQL_Status_t  SQLStatus;
-    size_t        PageCnt;
-    sqlite3_stmt* PageCntStmt;
-
+    if (DbSize == NULL) return BPLIB_NULL_PTR_ERROR;
     *DbSize = 0;
-    PageCnt = 0;
+    if (Inst == NULL) return BPLIB_NULL_PTR_ERROR;
+    sqlite3 *db = Inst->BundleStorage.db;
+    if (db == NULL) return BPLIB_ERROR;
 
-    SQLStatus = sqlite3_prepare_v2(Inst->BundleStorage.db, "PRAGMA page_count;", -1, &PageCntStmt, NULL);
-    if (SQLStatus != SQLITE_OK)
-    {
+    sqlite3_int64 PageCount = 0, PageSize = 0;
+    if (BPLib_SQL_ReadSizePragma(db, "PRAGMA page_count;", &PageCount) != SQLITE_OK ||
+        BPLib_SQL_ReadSizePragma(db, "PRAGMA page_size;", &PageSize) != SQLITE_OK ||
+        PageSize <= 0 || (uint64_t)PageCount > SIZE_MAX / (uint64_t)PageSize)
         return BPLIB_ERROR;
-    }
 
-    if (sqlite3_step(PageCntStmt) == SQLITE_ROW)
-    {
-        PageCnt = sqlite3_column_int(PageCntStmt, 0);
-    }
-
-    sqlite3_finalize(PageCntStmt);
-
-    *DbSize = PageCnt * 4096;
-
+    *DbSize = (size_t)((uint64_t)PageCount * (uint64_t)PageSize);
     return BPLIB_SUCCESS;
 }
 
-BPLib_Status_t BPLib_SQL_DiscardExpired(BPLib_Instance_t* Inst, size_t* NumDiscarded)
+/* Collect first, then delete atomically. Custody and byte accounting follow
+ * COMMIT so a failed DELETE cannot discard the in-memory custody entry. */
+static SQL_Status_t BPLib_SQL_DiscardBatch(BPLib_Instance_t *Inst, size_t *NumDiscarded,
+                                         sqlite3_stmt *Select, sqlite3_stmt *DeleteBundleStmt, bool Expired)
 {
-    BPLib_Status_t Status;
-    SQL_Status_t   SQLStatus;
-    sqlite3*       db;
+    sqlite3 *db = Inst->BundleStorage.db;
+    SQL_Status_t Status;
+    size_t Count = 0, Bytes = 0, CustodialCount = 0;
+    uint32_t *CustodialIds = NULL;
+    *NumDiscarded = 0;
 
-    Status = BPLIB_SUCCESS;
-    db     = Inst->BundleStorage.db;
-
-    SQLStatus = sqlite3_prepare_v2(db, GetExpiredSQL, -1, &GetExpiredStmt, 0);
-    if (SQLStatus != SQLITE_OK)
+    Status = sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL);
+    if (Status != SQLITE_OK) return Status;
+    sqlite3_reset(Select);
+    int BindIndex = 1;
+    if (Expired)
     {
-        fprintf(stderr, "Failed to prep: %s\n", sqlite3_errmsg(db));
-        return BPLIB_STOR_SQL_DISCARD_ERR;
+        Status = sqlite3_bind_int64(Select, BindIndex++, BPLib_TIME_GetMonotonicTime());
+        if (Status != SQLITE_OK) goto rollback;
     }
-
-    SQLStatus = sqlite3_prepare_v2(db, DeleteBundleSQL, -1, &DeleteBundleStmt, 0);
-    if (SQLStatus != SQLITE_OK)
+    Status = sqlite3_bind_int64(Select, BindIndex, BPLIB_STOR_DISCARDBATCHSIZE);
+    if (Status != SQLITE_OK) goto rollback;
+    while ((Status = sqlite3_step(Select)) == SQLITE_ROW)
     {
-        fprintf(stderr, "Failed to prep: %s\n", sqlite3_errmsg(db));
-        return BPLIB_STOR_SQL_DISCARD_ERR;
+        sqlite3_int64 RowBytes = sqlite3_column_int64(Select, 1);
+        if (Count >= BPLIB_STOR_DISCARDBATCHSIZE || RowBytes < 0 ||
+            (uint64_t)RowBytes > SIZE_MAX - Bytes)
+        {
+            Status = SQLITE_CORRUPT;
+            goto rollback;
+        }
+        Inst->BundleStorage.BundleRowsToDelete[Count++] = sqlite3_column_int64(Select, 0);
+        Bytes += (size_t)RowBytes;
+        if (sqlite3_column_int(Select, 3))
+        {
+            /* Keep the large configurable batch off the flight task's stack. */
+            if (CustodialIds == NULL)
+            {
+                CustodialIds = malloc(BPLIB_STOR_DISCARDBATCHSIZE * sizeof(*CustodialIds));
+                if (CustodialIds == NULL) { Status = SQLITE_NOMEM; goto rollback; }
+            }
+            CustodialIds[CustodialCount++] = (uint32_t)sqlite3_column_int64(Select, 2);
+        }
     }
-
-    SQLStatus = BPLib_SQL_DiscardExpiredImpl(db, NumDiscarded, Inst);
-    if (SQLStatus != SQLITE_OK)
+    if (Status != SQLITE_DONE) goto rollback;
+    if (Bytes > Inst->BundleStorage.BytesStorageInUse)
     {
-        Status = BPLIB_STOR_SQL_DISCARD_ERR;
+        Status = SQLITE_CORRUPT;
+        goto rollback;
     }
+    for (size_t Row = 0; Row < Count; ++Row)
+    {
+        sqlite3_reset(DeleteBundleStmt);
+        Status = sqlite3_bind_int64(DeleteBundleStmt, 1, Inst->BundleStorage.BundleRowsToDelete[Row]);
+        if (Status != SQLITE_OK) goto rollback;
+        Status = sqlite3_step(DeleteBundleStmt);
+        if (Status != SQLITE_DONE) goto rollback;
+        if (sqlite3_changes(db) != 1) { Status = SQLITE_CONSTRAINT; goto rollback; }
+    }
+    Status = sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+    if (Status != SQLITE_OK) goto rollback;
 
-    /* Finalize the statement */
-    sqlite3_finalize(GetExpiredStmt);
-    sqlite3_finalize(DeleteBundleStmt);
+    *NumDiscarded = Count;
+    Inst->BundleStorage.BytesStorageInUse -= Bytes;
+    for (size_t Row = 0; Row < CustodialCount; ++Row)
+        BPLib_CT_DeleteBundleFromCtdb(Inst, CustodialIds[Row]);
+    free(CustodialIds);
+    return SQLITE_OK;
 
+rollback:
+    /* Reset active statements and preserve the original failure over rollback. */
+    sqlite3_reset(Select);
+    sqlite3_reset(DeleteBundleStmt);
+    if (!sqlite3_get_autocommit(db) && sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL) != SQLITE_OK)
+        fprintf(stderr, "Failed to roll back discard batch: %s\n", sqlite3_errmsg(db));
+    free(CustodialIds);
     return Status;
 }
 
-SQL_Status_t BPLib_SQL_DiscardExpiredImpl(sqlite3* db, size_t* NumDiscarded, BPLib_Instance_t* Inst)
+/* Own both statements across collection, deletion, rollback and finalization. */
+static SQL_Status_t BPLib_SQL_DiscardOwned(BPLib_Instance_t *Inst, size_t *NumDiscarded, bool Expired)
 {
-    SQL_Status_t SQLStatus;
-    uint64_t     MonoTime;
-    size_t       ExpiredBytes;
-    uint32_t     CurrBundleId;
-    int64_t      BundleRow;
-    bool         IsCustodial;
-    size_t       NumToDiscard;
-
-   *NumDiscarded = 0;
-    ExpiredBytes = 0;
-    NumToDiscard = 0;
-
-    /* Get DTN Time */
-    MonoTime = BPLib_TIME_GetMonotonicTime();
-
-    /* Create a batch query */
-    SQLStatus = sqlite3_exec(db, "BEGIN;", 0, 0, 0);
-    if (SQLStatus != SQLITE_OK)
-    {
-        fprintf(stderr, "Failed to start transaction: %s\n", sqlite3_errmsg(db));
-        return SQLStatus;
-    }
-
-    sqlite3_reset(GetExpiredStmt);
-
-    /* Get all bundle rows to expire */
-
-    SQLStatus = sqlite3_bind_int64(GetExpiredStmt, 1, (int64_t)MonoTime);
-    if (SQLStatus != SQLITE_OK)
-    {
-        fprintf(stderr, "Failed to bind action_timestamp: %s\n", sqlite3_errmsg(db));
-        return SQLStatus;
-    }
-
-    SQLStatus = sqlite3_bind_int64(GetExpiredStmt, 2, BPLIB_STOR_DISCARDBATCHSIZE);
-    if (SQLStatus != SQLITE_OK)
-    {
-        fprintf(stderr, "Failed to bind LIMIT: %s\n", sqlite3_errmsg(db));
-        return SQLStatus;
-    }
-
-    SQLStatus = sqlite3_step(GetExpiredStmt);
-
-    /* Step through expired bundle rows */
-    while (SQLStatus == SQLITE_ROW)
-    {
-        /* Get information about bundle to delete */
-        Inst->BundleStorage.BundleRowsToDelete[NumToDiscard] = sqlite3_column_int64(GetExpiredStmt, 0);
-        ExpiredBytes += sqlite3_column_int64(GetExpiredStmt, 1);
-        CurrBundleId = sqlite3_column_int64(GetExpiredStmt, 2);
-        IsCustodial = sqlite3_column_int64(GetExpiredStmt, 3);
-
-        if (IsCustodial)
-        {
-            BPLib_CT_DeleteBundleFromCtdb(Inst, CurrBundleId);
-        }
-
-        SQLStatus = sqlite3_step(GetExpiredStmt);
-
-        NumToDiscard++;
-    }
-
-    for (BundleRow = 0; BundleRow < NumToDiscard; BundleRow++)
-    {
-        sqlite3_reset(DeleteBundleStmt);
-     
-        /* Delete bundle from storage */
-        SQLStatus = sqlite3_bind_int64(DeleteBundleStmt, 1,
-                                    Inst->BundleStorage.BundleRowsToDelete[BundleRow]); 
-        if (SQLStatus != SQLITE_OK)
-        {
-            fprintf(stderr, "Failed to bind BundleRow: %s\n", sqlite3_errmsg(db));
-            return SQLStatus;
-        }
-
-        SQLStatus = sqlite3_step(DeleteBundleStmt);
-        if (SQLStatus != SQLITE_DONE)
-        {
-            fprintf(stderr, "Failed to delete expired bundle: %s\n", sqlite3_errmsg(db));
-            return SQLStatus;            
-        }
-    }
-
-    /* If there have been no errors so far commit the delete */
-    if (SQLStatus == SQLITE_DONE)
-    {
-        SQLStatus = sqlite3_exec(db, "COMMIT;", 0, 0, 0);
-        if (SQLStatus != SQLITE_OK)
-        {
-            fprintf(stderr, "Failed to commit transaction\n");
-        }
-    }
-
-    /* The batch commit was not successful, ROLLBACK to prevent DB corruption */
-    if (SQLStatus != SQLITE_OK)
-    {
-        fprintf(stderr, "Attempting ROLLBACK\n");
-
-        SQLStatus = sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
-        if (SQLStatus != SQLITE_OK)
-        {
-            fprintf(stderr, "Failed to rollback transaction, RC=%d\n", SQLStatus);
-        }
-    }
-
-    /* Determine how many changes were made to the database, which is the number
-    ** of discarded bundles.
-    */
-    *NumDiscarded = NumToDiscard;
-
-    /* Decrement that counter that tracks bytes of storage used */
-    Inst->BundleStorage.BytesStorageInUse -= ExpiredBytes;    
-
-    return SQLITE_OK;
-}
-
-BPLib_Status_t BPLib_SQL_DiscardEgressed(BPLib_Instance_t* Inst, size_t* NumDiscarded)
-{
-    BPLib_Status_t Status;
-    SQL_Status_t   SQLStatus;
-    sqlite3*       db;
-
-    Status = BPLIB_SUCCESS;
-    db     = Inst->BundleStorage.db;
-
-    SQLStatus = sqlite3_prepare_v2(db, GetEgressedSQL, -1, &GetEgressedStmt, 0);
-    if (SQLStatus != SQLITE_OK)
-    {
-        fprintf(stderr, "Failed to prep: %s\n", sqlite3_errmsg(db));
-        return BPLIB_STOR_SQL_DISCARD_ERR;
-    }
-
-    SQLStatus = sqlite3_prepare_v2(db, DeleteBundleSQL, -1, &DeleteBundleStmt, 0);
-    if (SQLStatus != SQLITE_OK)
-    {
-        fprintf(stderr, "Failed to prep: %s\n", sqlite3_errmsg(db));
-        return BPLIB_STOR_SQL_DISCARD_ERR;
-    }
-
-    SQLStatus = BPLib_SQL_DiscardEgressedImpl(Inst, NumDiscarded);
-    if (SQLStatus != SQLITE_OK)
-    {
-        Status = BPLIB_STOR_SQL_DISCARD_ERR;
-    }
-
-    /* Finalize the statement */
-    sqlite3_finalize(GetEgressedStmt);
+    if (NumDiscarded) *NumDiscarded = 0;
+    if (Inst == NULL || NumDiscarded == NULL) return SQLITE_MISUSE;
+    sqlite3_stmt *Select = NULL, *DeleteBundleStmt = NULL;
+    SQL_Status_t Status = sqlite3_prepare_v2(Inst->BundleStorage.db,
+        Expired ? GetExpiredSQL : GetEgressedSQL, -1, &Select, NULL);
+    if (Status == SQLITE_OK)
+        Status = sqlite3_prepare_v2(Inst->BundleStorage.db, DeleteBundleSQL, -1, &DeleteBundleStmt, NULL);
+    if (Status == SQLITE_OK)
+        Status = BPLib_SQL_DiscardBatch(Inst, NumDiscarded, Select, DeleteBundleStmt, Expired);
+    sqlite3_finalize(Select);
     sqlite3_finalize(DeleteBundleStmt);
-
     return Status;
 }
 
-SQL_Status_t BPLib_SQL_DiscardEgressedImpl(BPLib_Instance_t *Inst, size_t* NumDiscarded)
+static BPLib_Status_t BPLib_SQL_Discard(BPLib_Instance_t *Inst, size_t *NumDiscarded, bool Expired)
 {
-    SQL_Status_t SQLStatus;
-    size_t       EgressedBytes;
-    int64_t      BundleRow;
-    size_t       NumToDiscard;
-    sqlite3*     db;
-    uint32_t     CurrBundleId;
-    bool         IsCustodial;
+    if (NumDiscarded) *NumDiscarded = 0;
+    if (Inst == NULL || NumDiscarded == NULL) return BPLIB_NULL_PTR_ERROR;
+    return BPLib_SQL_DiscardOwned(Inst, NumDiscarded, Expired) == SQLITE_OK ?
+        BPLIB_SUCCESS : BPLIB_STOR_SQL_DISCARD_ERR;
+}
 
-    *NumDiscarded  = 0;
-    EgressedBytes = 0;
-    NumToDiscard  = 0;
-    db            = Inst->BundleStorage.db;
+BPLib_Status_t BPLib_SQL_DiscardExpired(BPLib_Instance_t *Inst, size_t *NumDiscarded)
+{
+    return BPLib_SQL_Discard(Inst, NumDiscarded, true);
+}
 
-    /* Create a batch query */
-    SQLStatus = sqlite3_exec(db, "BEGIN;", 0, 0, 0);
-    if (SQLStatus != SQLITE_OK)
-    {
-        fprintf(stderr, "Failed to start transaction: %s\n", sqlite3_errmsg(db));
-        return SQLStatus;
-    }
+SQL_Status_t BPLib_SQL_DiscardExpiredImpl(sqlite3 *db, size_t *NumDiscarded, BPLib_Instance_t *Inst)
+{
+    (void)db;
+    return BPLib_SQL_DiscardOwned(Inst, NumDiscarded, true);
+}
 
-    /* 
-    ** Get all bundle rows that have been egressed 
-    */
+BPLib_Status_t BPLib_SQL_DiscardEgressed(BPLib_Instance_t *Inst, size_t *NumDiscarded)
+{
+    return BPLib_SQL_Discard(Inst, NumDiscarded, false);
+}
 
-    sqlite3_reset(GetEgressedStmt);
-
-    SQLStatus = sqlite3_bind_int64(GetEgressedStmt, 1, BPLIB_STOR_DISCARDBATCHSIZE);
-    if (SQLStatus != SQLITE_OK)
-    {
-        fprintf(stderr, "Failed to bind LIMIT: %s\n", sqlite3_errmsg(db));
-        return SQLStatus;
-    }
-
-    SQLStatus = sqlite3_step(GetEgressedStmt);
-
-    /* Step through egressed bundle rows */
-    while (SQLStatus == SQLITE_ROW)
-    {
-        /* Get information about bundle to delete */
-        Inst->BundleStorage.BundleRowsToDelete[NumToDiscard] = sqlite3_column_int64(GetEgressedStmt, 0);
-        EgressedBytes += sqlite3_column_int64(GetEgressedStmt, 1);
-        CurrBundleId = sqlite3_column_int64(GetEgressedStmt, 2);
-        IsCustodial = sqlite3_column_int64(GetEgressedStmt, 3);
-
-        if (IsCustodial)
-        {
-            BPLib_CT_DeleteBundleFromCtdb(Inst, CurrBundleId);
-        }
-
-        SQLStatus = sqlite3_step(GetEgressedStmt);
-
-        NumToDiscard++;
-    }
-
-    for (BundleRow = 0; BundleRow < NumToDiscard; BundleRow++)
-    {
-        sqlite3_reset(DeleteBundleStmt);
-     
-        /* Delete bundle from storage */
-        SQLStatus = sqlite3_bind_int64(DeleteBundleStmt, 1,
-                                    Inst->BundleStorage.BundleRowsToDelete[BundleRow]); 
-        if (SQLStatus != SQLITE_OK)
-        {
-            fprintf(stderr, "Failed to bind BundleRow: %s\n", sqlite3_errmsg(db));
-            return SQLStatus;
-        }
-
-        SQLStatus = sqlite3_step(DeleteBundleStmt);
-        if (SQLStatus != SQLITE_DONE)
-        {
-            fprintf(stderr, "Failed to delete egressed bundle: %s\n", sqlite3_errmsg(db));
-            return SQLStatus;            
-        }
-    }
-
-    /* If there have been no errors so far commit the delete */
-    if (SQLStatus == SQLITE_DONE)
-    {
-        SQLStatus = sqlite3_exec(db, "COMMIT;", 0, 0, 0);
-        if (SQLStatus != SQLITE_OK)
-        {
-            fprintf(stderr, "Failed to commit transaction\n");
-        }
-    }
-
-    /* The batch commit was not successful, ROLLBACK to prevent DB corruption */
-    if (SQLStatus != SQLITE_OK)
-    {
-        fprintf(stderr, "Attempting ROLLBACK\n");
-
-        SQLStatus = sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
-        if (SQLStatus != SQLITE_OK)
-        {
-            fprintf(stderr, "Failed to rollback transaction, RC=%d\n", SQLStatus);
-        }
-    }
-
-    *NumDiscarded = NumToDiscard;
-
-    /* Decrement that counter that tracks bytes of storage used */
-    Inst->BundleStorage.BytesStorageInUse -= EgressedBytes;
-
-    return SQLITE_OK;
+SQL_Status_t BPLib_SQL_DiscardEgressedImpl(BPLib_Instance_t *Inst, size_t *NumDiscarded)
+{
+    return BPLib_SQL_DiscardOwned(Inst, NumDiscarded, false);
 }
 
 BPLib_Status_t BPLib_SQL_Cleanup(BPLib_Instance_t* Inst)
@@ -724,6 +598,17 @@ BPLib_Status_t BPLib_SQL_GetDestEidWhereClause(BPLib_EID_Pattern_t* DestEIDs, si
     const char*    FindForDestServSql_RangeClause = " (dest_service BETWEEN ? AND ?))";
     const char*    FindForDestServSql_EqalityClause = " (dest_service = ?))";
     const char**   FindClausePtr;
+
+    if (DestEIDs == NULL || WhereClause == NULL) return BPLIB_NULL_PTR_ERROR;
+    WhereClause[0] = '\0';
+    if (NumEIDs == 0 || NumEIDs > BPLIB_MAX_CONTACT_DEST_EIDS) return BPLIB_STOR_PARAM_ERR;
+    for (i = 0; i < NumEIDs; ++i)
+    {
+        if (DestEIDs[i].MaxNode == 0 && DestEIDs[i].MaxService == 0) break;
+        if (DestEIDs[i].MinNode > DestEIDs[i].MaxNode || DestEIDs[i].MinService > DestEIDs[i].MaxService ||
+            DestEIDs[i].MaxNode > INT64_MAX || DestEIDs[i].MaxService > INT64_MAX)
+            return BPLIB_STOR_PARAM_ERR;
+    }
 
     MaxWhereLen = BPLIB_SQL_MAX_STRLEN - 180; /* size of final query minus the non-where clause stuff */
 

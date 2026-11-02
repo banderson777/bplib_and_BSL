@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -317,7 +318,10 @@ void BPLib_STOR_UpdateCustodialBundles(BPLib_Instance_t* Inst);
  *
  *  \par Description
  *       Add the provided bundle ID and storage operation to the custodial bundle update
- *       batch. If the batch size is exceeded, an update operation is triggered.
+ *       update path. This compatibility entry point now commits each operation
+ *       synchronously under the storage lock. Success means durable commit;
+ *       failure means the caller must retain/retry the operation. No accepted
+ *       operation is left only in the volatile batch.
  *
  *  \par Assumptions, External Events, and Notes:
  *
@@ -325,9 +329,9 @@ void BPLib_STOR_UpdateCustodialBundles(BPLib_Instance_t* Inst);
  *  \param[in] BundleID Unique bundle identifier
  *  \param[in] Op Enumeration of storage operation to run
  *
- *  \return void
+ *  \return BPLIB_SUCCESS after commit, otherwise a validation or SQL error
  */
-void BPLib_STOR_AddToCustodialUpdateBatch(BPLib_Instance_t *Inst, uint32_t BundleId, 
+BPLib_Status_t BPLib_STOR_AddToCustodialUpdateBatch(BPLib_Instance_t *Inst, uint32_t BundleId, 
                                                                     BPLib_CT_StorOp_t Op);
 
 /**

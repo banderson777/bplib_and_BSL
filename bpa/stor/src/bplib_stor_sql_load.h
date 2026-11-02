@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -27,20 +28,8 @@
 
 #include "bplib_stor_sql.h"
 
-/* ======= */
-/* Globals */
-/* ======= */
-
-/* SQL query statements */
-extern sqlite3_stmt* FindBlobStmt;
-extern sqlite3_stmt* FindForEgressIDStmt;
-extern sqlite3_stmt* MarkEgressedStmt;
-
-/* SQL query strings */
-
-extern const char* FindBlobSQL;
-extern       char  FindForEgressIdSQL[BPLIB_SQL_MAX_STRLEN];
-extern const char* MarkEgressedSQL;
+/* Statement and generated query ownership is local to each invocation.
+ * Callers must continue to serialize access to each instance/connection. */
 
 /* =================== */
 /* Function Prototypes */
@@ -51,18 +40,19 @@ BPLib_Status_t BPLib_SQL_FindForEIDs(BPLib_Instance_t* Inst, BPLib_STOR_LoadBatc
 
 SQL_Status_t BPLib_SQL_FindForEIDsImpl(BPLib_Instance_t* Inst, BPLib_STOR_LoadBatch_t* Batch,
                                         BPLib_EID_Pattern_t* DestEIDs, size_t NumEIDs,
-                                        size_t MaxBundles, bool LocalDelivery);
+                                        size_t MaxBundles, bool LocalDelivery, sqlite3_stmt *FindForEgressIDStmt);
 
 BPLib_Status_t BPLib_SQL_MarkBatchEgressed(BPLib_Instance_t* Inst, 
                             BPLib_STOR_LoadBatch_t* Batch, bool LocalDelivery);
 
 SQL_Status_t BPLib_SQL_MarkBatchEgressedImpl(BPLib_Instance_t* Inst, 
-                                    BPLib_STOR_LoadBatch_t* Batch, bool LocalDelivery);
+                                    BPLib_STOR_LoadBatch_t* Batch, bool LocalDelivery,
+                                    sqlite3_stmt *MarkEgressedStmt, sqlite3_stmt *ResetRetransmitStmt);
 
 BPLib_Status_t BPLib_SQL_LoadBundle(BPLib_Instance_t* Inst, int64_t BundleRowID,
                                     BPLib_Bundle_t** Bundle);
 
 SQL_Status_t BPLib_SQL_LoadBundleImpl(BPLib_Instance_t* Inst, int64_t BundleRowID,
-                                        BPLib_Bundle_t** Bundle);
+                                        BPLib_Bundle_t** Bundle, sqlite3_stmt *FindBlobStmt);
 
 #endif

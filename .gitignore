@@ -1,3 +1,9 @@
+# Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md.
 build/
 bp.out
 .vscode/
+
+# Standalone local dependency builds
+/osal-build/
+/osal-staging/
+/osal/

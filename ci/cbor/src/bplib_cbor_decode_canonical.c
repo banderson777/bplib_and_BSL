@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -114,7 +115,6 @@ BPLib_Status_t BPLib_CBOR_DecodeCanonical(BPLib_Instance_t *Inst, QCBORDecodeCon
 {
     BPLib_Status_t          Status;
     BPLib_CanBlockHeader_t* CanonicalBlockHdr;
-    BPLib_CanBlockHeader_t  SpareCanonicalBlockHdr;
     QCBORItem               ArrayItem;
     QCBORItem               HopCountItem;
     QCBORItem               CustodyTransferItem;
@@ -164,12 +164,9 @@ BPLib_Status_t BPLib_CBOR_DecodeCanonical(BPLib_Instance_t *Inst, QCBORDecodeCon
         /* This is an extension block  */
         if (CanonicalBlockIndex >= BPLIB_MAX_NUM_EXTENSION_BLOCKS)
         {
-            /*
-            ** all of the ext block metadata fields were taken
-            ** eventually, we might want to throw an error here.
-            ** however, for now, continue decoding the block data into a spare buffer, for debugging
-            */
-            CanonicalBlockHdr = &SpareCanonicalBlockHdr;
+            /* Only the payload has storage at this final canonical index.
+             * A spare header cannot protect the indexed extension data below. */
+            return BPLIB_CBOR_DEC_CANON_BLOCK_INDEX_ERR;
         }
         else
         {

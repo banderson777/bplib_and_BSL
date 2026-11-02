@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -307,7 +308,12 @@ BPLib_Status_t BPLib_CLA_ContactStart(BPLib_Instance_t *Inst, uint32_t ContactId
         Status = BPLib_FWP_ProxyCallbacks.BPA_CLAP_ContactStart(ContactId);
         if (Status == BPLIB_SUCCESS)
         {
-            (void) BPLib_CT_AssignSeqCounter(Inst, ContactId);
+            Status = BPLib_CT_AssignSeqCounter(Inst, ContactId);
+            if (Status != BPLIB_SUCCESS)
+            {
+                (void) BPLib_FWP_ProxyCallbacks.BPA_CLAP_ContactStop(ContactId);
+                return Status;
+            }
 
             (void) BPLib_CLA_SetContactRunState(ContactId, BPLIB_CLA_STARTED); /* Ignore return since pre-call run state is valid */
         }

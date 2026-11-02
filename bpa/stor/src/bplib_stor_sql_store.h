@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -31,10 +32,14 @@
 /* Globals */
 /* ======= */
 
-/* SQL query statements */
-
-extern sqlite3_stmt* InsertBlobStmt;
-extern sqlite3_stmt* InsertMetadataStmt;
+/* One invocation owns its prepared statements. Same-instance callers still
+ * serialize storage operations; distinct instances may store concurrently. */
+typedef struct
+{
+    sqlite3_stmt *Metadata;
+    sqlite3_stmt *Blob;
+    sqlite3_stmt *Lookup;
+} BPLib_SQL_StoreStatements_t;
 
 /* SQL query strings */
 
@@ -45,14 +50,18 @@ extern const char* InsertMetadataSQL;
 /* Function Prototypes */
 /* =================== */
 
-SQL_Status_t BPLib_SQL_StoreMetadata(BPLib_Bundle_t* Bundle, BPLib_BundleCache_t* BundleCache);
+SQL_Status_t BPLib_SQL_StoreMetadata(BPLib_Bundle_t* Bundle, sqlite3_stmt *InsertMetadataStmt);
 
-SQL_Status_t BPLib_SQL_StoreChunk(int64_t BundleRowID, const void* Chunk, size_t ChunkSize);
+/* Encoded chunk storage borrows Chunk only during this call. Bindings are
+ * cleared before return; SQLITE_DONE requires one inserted row and successful cleanup.
+ * A prior statement error does not prevent retry with new parameters. */
+SQL_Status_t BPLib_SQL_StoreChunk(int64_t BundleRowID, const void* Chunk, size_t ChunkSize, sqlite3_stmt *InsertBlobStmt);
 
-SQL_Status_t BPLib_SQL_StoreBundle(sqlite3* db, BPLib_Bundle_t* Bundle, BPLib_BundleCache_t* BundleCache);
+SQL_Status_t BPLib_SQL_StoreBundle(sqlite3* db, BPLib_Bundle_t* Bundle, BPLib_SQL_StoreStatements_t *Statements);
 
 SQL_Status_t BPLib_SQL_StoreImpl(BPLib_Instance_t* Inst, size_t *TotalBytesStored,
-                                size_t *DuplicateBundlesIgnored, size_t *CustodialBundles);
+                                size_t *DuplicateBundlesIgnored, size_t *CustodialBundles,
+                                BPLib_SQL_StoreStatements_t *Statements);
 
 BPLib_Status_t BPLib_SQL_Store(BPLib_Instance_t* Inst, size_t *TotalBytesStored,
                                 size_t *DuplicateBundlesIgnored, size_t *CustodialBundles);

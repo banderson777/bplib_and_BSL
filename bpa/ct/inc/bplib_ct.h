@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -46,7 +47,7 @@
 #define BPLIB_CT_MAX_SEQ_RANGE_LEN                  (11u)
 
 /**
- * \brief Sequence ID value when it will automatically roll over to 1
+ * \brief Reserved unassigned sequence ID, skipped when allocating a fresh stream
  */
 #define BPLIB_CT_SEQ_ID_ROLLOVER_VALUE              (100u)
 
@@ -72,6 +73,16 @@
  * \brief Size of a full CCS batch operation
  */
 #define BPLIB_CT_BATCH_SIZE                         (100u)
+
+/** Maximum sequence positions processed per incoming collection, including gaps.
+ * Reject larger collections before any changes. Missions may override the bound;
+ * peers must split larger spans to remain within the receiving mission's limit. */
+#ifndef BPLIB_CT_MAX_CCS_SEQUENCE_SPAN
+#define BPLIB_CT_MAX_CCS_SEQUENCE_SPAN BPLIB_CT_DB_MAX_ENTRIES
+#endif
+#if BPLIB_CT_MAX_CCS_SEQUENCE_SPAN < 1 || BPLIB_CT_MAX_CCS_SEQUENCE_SPAN > UINT32_MAX
+#error "BPLIB_CT_MAX_CCS_SEQUENCE_SPAN must be a positive 32-bit value"
+#endif
 
 /**
  * \brief Minimum length of an encoded Compressed Custody Signal bundle in bytes
@@ -148,7 +159,7 @@ typedef struct
 
     /* Additional information */
     size_t   SeqRangeLen;
-    size_t   LastSeqNumAdded;
+    uint64_t LastSeqNumAdded;
     BPLib_CT_DispositionCode_t DispositionCode;
 } BPLib_CT_BundleSeqCollection_t;
 
@@ -209,6 +220,10 @@ typedef struct
 
     BPLib_SeqCounter_t SeqCounters[BPLIB_MAX_NUM_CONTACTS];     /** \brief Currently active sequence counters */
     uint64_t LastSeqCounterId;                                  /** \brief Last sequence counter ID assigned to a contact */
+    /** Optional durable allocator, installed before contacts start. Called under
+     * Lock; return a never-reused, nonzero ID other than the unassigned sentinel.
+     * NULL retains the default volatile sequence allocation behavior. */
+    BPLib_Status_t (*AllocateSequenceId)(uint64_t *Id);
 
     size_t CurrDbSize;                                          /** \brief Number of entries in CTDB */
     size_t BundleCountInCustody;                                /** \brief Number of bundles in custody. Bundles may be in the CTDB but until they are stored they are not actually in custody */
@@ -349,7 +364,10 @@ BPLib_Status_t BPLib_CT_ProcessCcs(BPLib_Instance_t *Inst, BPLib_CT_Deserialized
  * \brief Assign a new sequence counter
  *
  *  \par Description
- *       Assign a new sequence counter to a new contact.
+ *       Assign a new sequence identifier and reset its counter to zero. The
+ *       default allocator skips reserved identifier 100 and fails on exhaustion.
+ *       Missions requiring uniqueness across restart must install a durable
+ *       allocator callback. Allocation failure leaves contact state unchanged.
  *
  *  \par Assumptions, External Events, and Notes:
  *       This is done by CLA on the contact-start directive

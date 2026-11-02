@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -42,7 +43,7 @@
 /**
  ** \brief Defines the total size of a big memory block
 */
-#define BPLIB_MEM_BIG_BLK_SIZE (1024u)
+#define BPLIB_MEM_BIG_BLK_SIZE (2048u)
 
 /**
  ** \brief Defines the size of a big memory block's available user data
@@ -128,6 +129,58 @@ typedef struct BPLib_MEM_Pool
     pthread_mutex_t lock; /**< Mutex for synchronizing access to the pool */
     size_t         HighWaterMark;   /** \brief Highwater memory mark */
 } BPLib_MEM_Pool_t;
+
+/** Generic sequential access to a canonical block's BTSD. */
+typedef struct
+{
+    BPLib_Bundle_t *bundle;
+    uint64_t offset;
+    size_t remaining;
+} BPLib_BlockReader_t;
+
+typedef struct
+{
+    BPLib_Bundle_t *bundle;
+    uint64_t offset;
+    size_t remaining;
+    size_t total;
+    uint64_t block_num;
+    uint8_t *staging;
+    size_t written;
+} BPLib_BlockWriter_t;
+
+/** Borrow a decoded bundle and open sequential access to canonical block BTSD.
+ * Keep bundle/blob/offset metadata alive and unchanged throughout access.
+ * Missing block, empty BTSD, or invalid pointers return NULL_PTR_ERROR.
+ * Reader allocates nothing and needs no close; caller synchronizes mutations.
+ */
+BPLib_Status_t BPLib_BlockReaderOpen(BPLib_Bundle_t *bundle, uint64_t block_num,
+                                     BPLib_BlockReader_t *reader);
+/** Read min(buf_size, remaining) bytes from an opened reader. EOF or zero
+ * capacity succeeds with *bytes_read == 0. Copy failures set *bytes_read to zero
+ * and leave position unchanged. Invalid pointers return NULL_PTR_ERROR.
+ */
+BPLib_Status_t BPLib_BlockReaderRead(BPLib_BlockReader_t *reader, void *buf,
+                                     size_t buf_size, size_t *bytes_read);
+
+/** Allocate staging for exactly the decoded BTSD size; resizing is unsupported.
+ * Borrow a valid decoded bundle until Close; do not concurrently mutate it.
+ * Size/block/blob/output errors return BUF_LEN_ERROR, allocation failure ERROR.
+ * On success call Close exactly once; writes do not modify the blob until then.
+ */
+BPLib_Status_t BPLib_BlockWriterOpen(BPLib_Bundle_t *bundle, uint64_t block_num,
+                                     size_t btsd_size, BPLib_BlockWriter_t *writer);
+/** Append borrowed bytes to staging; excess size returns BUF_LEN_ERROR.
+ * Requires a successfully opened writer; invalid pointers return NULL_PTR_ERROR.
+ */
+BPLib_Status_t BPLib_BlockWriterWrite(BPLib_BlockWriter_t *writer, const void *buf,
+                                      size_t size);
+/** Free staging exactly once. success=false discards it; success=true requires
+ * all bytes, copies into the existing blob, and marks the block for re-encoding.
+ * Incomplete commit frees staging and returns BUF_LEN_ERROR; do not close again
+ * even on that error. Offsets/blob must still match the bundle used at Open.
+ */
+BPLib_Status_t BPLib_BlockWriterClose(BPLib_BlockWriter_t *writer, bool success);
 
 
 /*
@@ -244,8 +297,10 @@ BPLib_Status_t BPLib_MEM_BlobCopyOut(BPLib_Bundle_t* bundle, void* out_buffer, s
 /**
  * @brief Copies part of the blob data out of a bundle.
  * 
- * This function copies the blob data, starting at the offset provided, into the provided buffer.
- * If the bundle has more blob data than OutputBufferSize, this function returns BPLIB_BUF_LEN_ERROR
+ * This function copies populated blob bytes, starting at the supplied offset.
+ * The complete range is checked against block used lengths before any copy;
+ * an invalid range leaves OutputBuffer unchanged. A zero-byte read at the
+ * exact end of the blob succeeds. NumBytesToCopy must fit OutputBufferSize.
  * 
  * @param[in] Bundle (BPLib_Bundle_t*) Pointer to the bundle from which to copy the data.
  * @param[in] Offset (uint64_t) Offset into the user data

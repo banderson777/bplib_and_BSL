@@ -1,3 +1,4 @@
+# Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md.
 ##################################################################
 #
 # Bundle Protocol Library (BPLib) CMake build recipe
@@ -42,7 +43,7 @@ else()
     set(BPLIB_DEFAULT_BUILD_UNIT_TESTS OFF)
 endif()
 
-option(BPLIB_BUILD_TEST_TOOLS "Whether or not to build the test programs as part of BPLib (standalone POSIX builds only)" ${BPLIB_DEFAULT_BUILD_TEST_TOOLS})
+option(BPLIB_BUILD_TEST_TOOLS "Whether or not to build the test programs as part of BPLib (standalone host builds)" ${BPLIB_DEFAULT_BUILD_TEST_TOOLS})
 option(BPLIB_INSTALL_LIBRARIES "Whether or not to install the libraries" ${BPLIB_STANDALONE_BUILD_MODE})
 option(BPLIB_USE_EXTERNAL_OSAL "Whether to use an external OSAL package, if OSAL is selected as OS layer" ${BPLIB_STANDALONE_BUILD_MODE})
 option(BPLIB_ENABLE_UNIT_TESTS "Whether to build unit tests (requires NASA OSAL and UT Assert)" ${BPLIB_DEFAULT_BUILD_UNIT_TESTS})
@@ -86,6 +87,8 @@ endif()
 # May want to add equivalent for other compiler flavors too
 if ("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU")
    list(APPEND BPLIB_COMMON_COMPILE_OPTIONS -Wall -Werror -pedantic -Wno-format-truncation -Wno-stringop-truncation -g)
+elseif (MSVC)
+   list(APPEND BPLIB_COMMON_COMPILE_OPTIONS /W4)
 endif()
 
 # If standalone build and not cross compile, then enable creation of the "make test" target
@@ -132,7 +135,10 @@ if (IS_CFS_ARCH_BUILD)
 
   # link with the requisite dependencies
   set_target_properties(bplib PROPERTIES LINK_FLAGS "-Wl,-rpath,${BPLIB_RUNTIME_SEARCH_PATH}")
-  target_link_libraries(bplib qcbor m sqlite3)
+  target_link_libraries(bplib qcbor sqlite3)
+  if (NOT WIN32)
+    target_link_libraries(bplib m)
+  endif()
 
 else()
 
@@ -143,7 +149,7 @@ else()
   add_library(bplib ${BPLIB_SRC})
 
   # link with the requisite dependencies
-  target_link_libraries(bplib qcbor m sqlite3)
+  target_link_libraries(bplib qcbor sqlite3)
 
   # Add in the required link libraries based on OS adapter selection
   # this should preferably be in OS subdirectory, but it needs to be done
@@ -151,7 +157,11 @@ else()
   if (BPLIB_OS_LAYER STREQUAL OSAL)
     target_link_libraries(bplib osal)
   elseif(BPLIB_OS_LAYER STREQUAL POSIX)
-    target_link_libraries(bplib rt pthread)
+    if (WIN32)
+      target_link_libraries(bplib ws2_32)
+    else()
+      target_link_libraries(bplib rt pthread)
+    endif()
   endif()
 
   # Install and also export this library, so it can be found via
@@ -186,7 +196,9 @@ else()
   endif()
 
   # Build bpcat always
-  add_subdirectory(app)
+  if (BPLIB_BUILD_TEST_TOOLS AND NOT WIN32)
+    add_subdirectory(app)
+  endif()
 
 endif()
 

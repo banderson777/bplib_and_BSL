@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -133,20 +134,25 @@ BPLib_Status_t BPLib_CBOR_EncodePayload(BPLib_Bundle_t* StoredBundle,
     {
         return BPLIB_NULL_PTR_ERROR;
     }
+    if (OutputBufferSize == 0)
+    {
+        *NumBytesCopied = 0;
+        return BPLIB_CBOR_ENC_BUNDLE_OUTPUT_BUF_LEN_4_ERR;
+    }
     /*
     ** Jam in an "open definite array" character
     ** Major Type: 4 (array)
-    ** Additional Info: number of data items in array (6 total)
+    ** Additional Info: number of data items in array (5 without CRC, otherwise 6)
     **  1. Block Type
     **  2. Block Num
     **  3. Block Processing Flags
     **  4. CRC Type
     **  5. Block-Specific Data (ADU)
-    **  6. CRC Value
-    ** 0b100_00110 == 0x86
+    **  6. CRC Value (only when CRC is present)
+    ** 0b100_00101 == 0x85; 0b100_00110 == 0x86
     */
     CurrentOutputBufferAddr = (uintptr_t)(OutputBuffer);
-    *(uint8_t*)CurrentOutputBufferAddr = 0x86;
+    *(uint8_t*)CurrentOutputBufferAddr = StoredBundle->blocks.PayloadHeader.CrcType == BPLib_CRC_Type_None ? 0x85 : 0x86;
     TotalBytesCopied = 1;
     CurrentOutputBufferAddr++;
     BytesLeftInOutputBuffer = OutputBufferSize - TotalBytesCopied;
@@ -230,7 +236,7 @@ BPLib_Status_t BPLib_CBOR_EncodePayload(BPLib_Bundle_t* StoredBundle,
         return BPLIB_CBOR_ENC_PAYL_ADD_BYTE_STR_HEAD_ERR;
     }
 
-    if (BytesLeftInOutputBuffer <= PayloadSize)
+    if (BytesLeftInOutputBuffer < PayloadSize)
     {
         *NumBytesCopied = 0;
         return BPLIB_CBOR_ENC_BUNDLE_OUTPUT_BUF_LEN_4_ERR;        

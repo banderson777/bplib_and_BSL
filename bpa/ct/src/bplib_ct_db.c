@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -73,7 +74,8 @@ BPLib_Status_t BPLib_CT_InitEntry(BPLib_Instance_t *Inst, uint32_t BundleId)
     BPLib_MEM_Block_t  *DbMemBlk = NULL;
     BPLib_CT_DbEntry_t *DbEntry  = NULL;
 
-    if (Inst->Ct.CurrDbSize == BPLIB_CT_DB_MAX_ENTRIES)
+    if (Inst == NULL) return BPLIB_NULL_PTR_ERROR;
+    if (Inst->Ct.CurrDbSize >= BPLIB_CT_DB_MAX_ENTRIES)
     {
         return BPLIB_CT_FULL_DB_ERR;
     }
@@ -94,23 +96,32 @@ BPLib_Status_t BPLib_CT_InitEntry(BPLib_Instance_t *Inst, uint32_t BundleId)
     DbEntry->SeqId = BPLIB_CT_SEQ_ID_ROLLOVER_VALUE;
     DbEntry->State = BPLib_CT_Initialized;
 
-    Inst->Ct.CurrDbSize++;
-    
-    return BPLib_RBT_InsertValueUnique(BundleId, &(Inst->Ct.IdTreeRoot), 
-                                            &(DbEntry->IdRbtLink));
+    BPLib_Status_t Status = BPLib_RBT_InsertValueUnique(BundleId, &Inst->Ct.IdTreeRoot,
+                                                     &DbEntry->IdRbtLink);
+    if (Status == BPLIB_SUCCESS) Inst->Ct.CurrDbSize++;
+    else BPLib_MEM_BlockFree(&Inst->pool, DbMemBlk);
+    return Status;
 }
 
 BPLib_Status_t BPLib_CT_UpdateEntry(BPLib_Instance_t *Inst, BPLib_CT_DbEntry_t *DbEntry, 
                                         uint64_t SeqId, uint64_t SeqNum)
 {
-    /* Update entry sequence ID/number */
+    if (Inst == NULL || DbEntry == NULL) return BPLIB_NULL_PTR_ERROR;
+    uint64_t PreviousId = DbEntry->SeqId, PreviousNumber = DbEntry->SeqNum;
     DbEntry->SeqId = SeqId;
     DbEntry->SeqNum = SeqNum;
-    DbEntry->State = BPLib_CT_Transmitted;
-    
-    return BPLib_RBT_InsertValueGeneric(SeqId, &(Inst->Ct.SeqTreeRoot), 
-                                        &(DbEntry->SeqRbtLink),
-                                        BPLib_CT_CompareDbEntries, &(DbEntry->SeqNum));
+    BPLib_Status_t Status = BPLib_RBT_InsertValueGeneric(SeqId, &Inst->Ct.SeqTreeRoot,
+                                                       &DbEntry->SeqRbtLink,
+                                                       BPLib_CT_CompareDbEntries, &DbEntry->SeqNum);
+    if (Status == BPLIB_SUCCESS) DbEntry->State = BPLib_CT_Transmitted;
+    else
+    {
+        /* Failed duplicate insertion leaves the new link detached. An already
+         * attached link is rejected without modification by the RBT API. */
+        DbEntry->SeqId = PreviousId;
+        DbEntry->SeqNum = PreviousNumber;
+    }
+    return Status;
 }
 
 
@@ -121,7 +132,8 @@ BPLib_Status_t BPLib_CT_AddToCtdb(BPLib_Instance_t *Inst, uint64_t SeqId,
     BPLib_CT_DbEntry_t *DbEntry  = NULL;
     BPLib_Status_t Status;
 
-    if (Inst->Ct.CurrDbSize == BPLIB_CT_DB_MAX_ENTRIES)
+    if (Inst == NULL) return BPLIB_NULL_PTR_ERROR;
+    if (Inst->Ct.CurrDbSize >= BPLIB_CT_DB_MAX_ENTRIES)
     {
         return BPLIB_CT_FULL_DB_ERR;
     }
@@ -135,23 +147,36 @@ BPLib_Status_t BPLib_CT_AddToCtdb(BPLib_Instance_t *Inst, uint64_t SeqId,
 
     DbEntry = &(DbMemBlk->user_data.DbEntry);
     
-    /* Set CTDB entry values */
+    memset(DbEntry, 0, sizeof(*DbEntry));
     DbEntry->BundleId = BundleId;
     DbEntry->SeqId = SeqId;
     DbEntry->SeqNum = SeqNum;
+    DbEntry->State = BPLib_CT_Initialized;
 
-    Inst->Ct.CurrDbSize++;
-    
-    Status = BPLib_RBT_InsertValueGeneric(SeqId, &(Inst->Ct.SeqTreeRoot), 
-                                        &(DbEntry->SeqRbtLink),
-                                        BPLib_CT_CompareDbEntries, &SeqNum);
-
+    Status = BPLib_RBT_InsertValueUnique(BundleId, &Inst->Ct.IdTreeRoot, &DbEntry->IdRbtLink);
     if (Status == BPLIB_SUCCESS)
     {
-        Status = BPLib_RBT_InsertValueUnique(BundleId, &(Inst->Ct.IdTreeRoot), 
-                                            &(DbEntry->IdRbtLink));
+        Status = BPLib_RBT_InsertValueGeneric(SeqId, &Inst->Ct.SeqTreeRoot,
+                                             &DbEntry->SeqRbtLink,
+                                             BPLib_CT_CompareDbEntries, &DbEntry->SeqNum);
+        if (Status != BPLIB_SUCCESS)
+        {
+            BPLib_Status_t Rollback = BPLib_RBT_ExtractNode(&Inst->Ct.IdTreeRoot, &DbEntry->IdRbtLink);
+            if (Rollback != BPLIB_SUCCESS)
+            {
+                /* A corrupt tree must not retain a pointer to freed storage.
+                 * Keep this initialized entry accounted for and report failure. */
+                Inst->Ct.CurrDbSize++;
+                return Rollback;
+            }
+        }
     }
-
+    if (Status == BPLIB_SUCCESS)
+    {
+        DbEntry->State = BPLib_CT_Transmitted;
+        Inst->Ct.CurrDbSize++;
+    }
+    else BPLib_MEM_BlockFree(&Inst->pool, DbMemBlk);
     return Status;
 }
 
@@ -160,6 +185,10 @@ BPLib_Status_t BPLib_CT_GetEntryFromCtdbWithSeq(BPLib_CT_Context_t *Context, uin
 {
     BPLib_Status_t Status = BPLIB_NOT_FOUND_ERR;
     BPLib_RBT_Link_t *RbtLink;
+
+    if (DbEntry == NULL) return BPLIB_NULL_PTR_ERROR;
+    *DbEntry = NULL;
+    if (Context == NULL) return BPLIB_NULL_PTR_ERROR;
 
     RbtLink = BPLib_RBT_SearchGeneric(SeqId, &Context->SeqTreeRoot, 
                                                     BPLib_CT_CompareDbEntries, &SeqNum);
@@ -179,6 +208,10 @@ BPLib_Status_t BPLib_CT_GetEntryFromCtdbWithId(BPLib_CT_Context_t *Context,
     BPLib_Status_t Status = BPLIB_NOT_FOUND_ERR;
     BPLib_RBT_Link_t *RbtLink;
 
+    if (DbEntry == NULL) return BPLIB_NULL_PTR_ERROR;
+    *DbEntry = NULL;
+    if (Context == NULL) return BPLIB_NULL_PTR_ERROR;
+
     RbtLink = BPLib_RBT_SearchUnique(BundleId, &Context->IdTreeRoot);
 
     if (RbtLink != NULL)
@@ -194,6 +227,7 @@ BPLib_Status_t BPLib_CT_RemoveFromCtdb(BPLib_Instance_t *Inst, BPLib_CT_DbEntry_
 {
     BPLib_Status_t Status = BPLIB_SUCCESS;
 
+    if (Inst == NULL || DbEntry == NULL) return BPLIB_NULL_PTR_ERROR;
     /* The sequence ID/num RBT node may or may not be initialized */
     if (DbEntry->State != BPLib_CT_Initialized && DbEntry->State != BPLib_CT_InCustody &&
         DbEntry->State != BPLib_CT_Delivered)

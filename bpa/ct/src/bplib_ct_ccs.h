@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -37,7 +38,9 @@ void BPLib_CT_ResetOpenCcs(BPLib_CT_OpenCcs_t *OpenCcs);
 /**
  * \brief     Add values from a CTEB to an open CCS's suite of information. This 
  *            function also checks the size of a CCS against the limit and starts
- *            the process of sending the CCS off if it's at or beyond that limit
+ *            the process of sending the CCS off if it's at or beyond that limit.
+ *            Span/range overflow flushes the previous CCS and seeds the next with
+ *            the triggering acknowledgement. The caller holds the custody lock.
  * \param[in] Instance        The struct that holds the currently open CCSs, one
  *                            of which we need to add to, and the memory pool from
  *                            which bundles can be generated from if the open CCS
@@ -79,7 +82,9 @@ BPLib_Status_t BPLib_CT_ProcessBundleSeqCollection(BPLib_Instance_t *Inst, BPLib
 /**
  * \brief     If a bundle is received with an old, out-of-order sequence number,
  *            insert its sequence number to the open CCS and modify the CCS
- *            accordingly
+ *            accordingly. Positive included ranges and gaps are normalized within
+ *            BPLIB_CT_MAX_CCS_SEQUENCE_SPAN; failure leaves the collection and size
+ *            unchanged. The caller holds the custody lock.
  * \param[in] Collection Bundle sequence collection to insert number into
  * \param[in] BundleSeqNum Sequence number to insert
  * \param[in] CcsSizePtr Pointer to overall CCS size to update

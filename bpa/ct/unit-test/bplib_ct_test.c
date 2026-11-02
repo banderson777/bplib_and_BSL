@@ -1,3 +1,4 @@
+/* Local integration modifications (banderson777, 2026); see LOCAL_CHANGES.md. */
 /*
  * NASA Docket No. GSC-19,559-1, and identified as "Delay/Disruption Tolerant Networking 
  * (DTN) Bundle Protocol (BP) v7 Core Flight System (cFS) Application Build 7.0
@@ -423,8 +424,8 @@ void Test_BPLib_CT_AssignSeqCounter_Nominal(void)
     UtAssert_INT32_EQ(BPLib_CT_AssignSeqCounter(&BplibInst, ContId), BPLIB_SUCCESS);
 
     UtAssert_EQ(uint64_t, BplibInst.Ct.SeqCounters[0].Counter, 0);
-    UtAssert_EQ(uint64_t, BplibInst.Ct.LastSeqCounterId, 1);
-    UtAssert_EQ(uint64_t, BplibInst.Ct.SeqCounters[0].Id, 1);
+    UtAssert_EQ(uint64_t, BplibInst.Ct.LastSeqCounterId, BPLIB_CT_SEQ_ID_ROLLOVER_VALUE + 1);
+    UtAssert_EQ(uint64_t, BplibInst.Ct.SeqCounters[0].Id, BPLIB_CT_SEQ_ID_ROLLOVER_VALUE + 1);
 }
 
 void Test_BPLib_CT_AssignSeqCounter_InputErr(void)
