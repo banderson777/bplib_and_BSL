@@ -457,6 +457,8 @@ BPLib_Status_t BPLib_QCBOR_AdminRecordContentParserImpl(QCBORDecodeContext* ctx,
     return Status;
 }
 
+/** Decode one custody sequence collection, rejecting unsupported disposition codes and invalid
+ * sequence range lengths before use by custody processing. */
 BPLib_Status_t BPLib_QCBOR_BundleSeqCollectionParserImpl(QCBORDecodeContext* ctx, BPLib_CT_BundleSeqCollection_t* Parsed, size_t* NumSeqCollections)
 {
     BPLib_Status_t Status;

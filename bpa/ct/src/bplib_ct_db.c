@@ -69,6 +69,8 @@ int BPLib_CT_CompareDbEntries(const BPLib_RBT_Link_t *Node, void *Arg)
     return -1;
 }
 
+/** Allocate a pending custody entry and publish its bundle ID index. Release the pool block if
+ * insertion fails; caller serializes index access. */
 BPLib_Status_t BPLib_CT_InitEntry(BPLib_Instance_t *Inst, uint32_t BundleId)
 {
     BPLib_MEM_Block_t  *DbMemBlk = NULL;
@@ -103,6 +105,8 @@ BPLib_Status_t BPLib_CT_InitEntry(BPLib_Instance_t *Inst, uint32_t BundleId)
     return Status;
 }
 
+/** Insert an existing entry under a sequence pair and mark it transmitted only after success.
+ * Restore its former fields on rejection. */
 BPLib_Status_t BPLib_CT_UpdateEntry(BPLib_Instance_t *Inst, BPLib_CT_DbEntry_t *DbEntry, 
                                         uint64_t SeqId, uint64_t SeqNum)
 {
@@ -125,6 +129,8 @@ BPLib_Status_t BPLib_CT_UpdateEntry(BPLib_Instance_t *Inst, BPLib_CT_DbEntry_t *
 }
 
 
+/** Insert a recovered entry into both indexes, rolling back the first index and allocation if
+ * the second insertion fails. */
 BPLib_Status_t BPLib_CT_AddToCtdb(BPLib_Instance_t *Inst, uint64_t SeqId, 
                                                     uint64_t SeqNum, uint32_t BundleId)
 {
@@ -180,6 +186,8 @@ BPLib_Status_t BPLib_CT_AddToCtdb(BPLib_Instance_t *Inst, uint64_t SeqId,
     return Status;
 }
 
+/** Find a borrowed custody entry by sequence stream and number. Clear the output on failure;
+ * use the entry under the caller’s custody lock. */
 BPLib_Status_t BPLib_CT_GetEntryFromCtdbWithSeq(BPLib_CT_Context_t *Context, uint64_t SeqId, 
                                             uint64_t SeqNum, BPLib_CT_DbEntry_t **DbEntry)
 {
@@ -202,6 +210,8 @@ BPLib_Status_t BPLib_CT_GetEntryFromCtdbWithSeq(BPLib_CT_Context_t *Context, uin
     return Status;
 }
 
+/** Find a borrowed custody entry by bundle ID. Clear the output on failure; use the entry under
+ * the caller’s custody lock. */
 BPLib_Status_t BPLib_CT_GetEntryFromCtdbWithId(BPLib_CT_Context_t *Context, 
                                         uint32_t BundleId, BPLib_CT_DbEntry_t **DbEntry)
 {
@@ -223,6 +233,8 @@ BPLib_Status_t BPLib_CT_GetEntryFromCtdbWithId(BPLib_CT_Context_t *Context,
     return Status;
 }
 
+/** Detach an entry from its applicable indexes, adjust custody accounting, and release its pool
+ * block after successful removal. */
 BPLib_Status_t BPLib_CT_RemoveFromCtdb(BPLib_Instance_t *Inst, BPLib_CT_DbEntry_t *DbEntry)
 {
     BPLib_Status_t Status = BPLIB_SUCCESS;

@@ -21,6 +21,8 @@
 
 #include "bplib_cbor_internal.h"
 
+/** Serialize a complete BPv7 bundle to caller-owned storage. Reuse eligible encoded ranges and
+ * encode dirty blocks from their decoded fields; report the encoded length on success. */
 BPLib_Status_t BPLib_CBOR_EncodeBundle(BPLib_Bundle_t* StoredBundle,
                                         void* OutputBuffer,
                                         size_t OutputBufferSize,

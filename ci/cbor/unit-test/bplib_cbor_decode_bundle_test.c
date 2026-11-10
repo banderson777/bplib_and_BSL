@@ -222,6 +222,8 @@ void Test_BPLib_CBOR_DecodeBundle_PrimaryAndPayload(void)
     UtAssert_EQ(uint64_t, bundle.blocks.PayloadHeader.CrcType, (uint64_t) BPLib_CRC_Type_CRC16);
 }
 
+/** Supply valid CRCs for the fixture blocks so parsing reaches the trailing item and rejects
+ * it. */
 void Test_BPLib_CBOR_DecodeBundle_ExtraAfterPayload(void)
 {
     BPLib_Bundle_t bundle;
@@ -505,6 +507,7 @@ void Test_BPLib_CBOR_DecodeBundle_DtnNone(void)
     UtAssert_EQ(uint64_t, bundle.blocks.PayloadHeader.CrcVal, 0xc68f);
 }
 
+/** Set a smaller configured bundle limit and verify rejection before decoding. */
 void Test_BPLib_CBOR_DecodeBundle_TooBig(void)
 {
     BPLib_Status_t Status;
@@ -547,6 +550,7 @@ void Test_BPLib_CBOR_VerifyBundleProcFlags_InvalidFlags(void)
     UtAssert_EQ(BPLib_Status_t, BPLib_CBOR_VerifyBundleProcFlags(BundleProcFlags), BPLIB_CBOR_DEC_PRIM_WRONG_FLAG_ERR);
 }
 
+/** Register decoder coverage cases with their shared setup and teardown. */
 void TestBplibCborDecode_Register(void)
 {
     UtTest_Add(Test_BPLib_CBOR_DecodeBundle_NullInputErrors, BPLib_CBOR_Test_Setup, BPLib_CBOR_Test_Teardown, "Test_BPLib_CBOR_DecodeBundle_NullInputErrors");

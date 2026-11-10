@@ -68,6 +68,7 @@ void BPLib_STOR_Test_CreateTestBundle(BPLib_Bundle_t* Bundle, uint32_t BundleId)
     Bundle->blob->used_len = 10; // strlen + 1 for \0
 }
 
+/** Release the heap-backed blob chain belonging to a synthetic test bundle. */
 void BPLib_STOR_Test_FreeTestBundle(BPLib_Bundle_t* Bundle)
 {
     BPLib_MEM_Block_t* CurrBlock;
@@ -130,6 +131,7 @@ static int32 DecodeFixture(void *User, int32 Status, uint32 Calls, const UT_Stub
     return BPLIB_SUCCESS;
 }
 
+/** Reset hooks and accounting, then initialize the fixture’s in-memory storage. */
 void BPLib_STOR_Test_Setup(void)
 {
     /* Initialize test environment to default state for every test */
@@ -164,6 +166,8 @@ void BPLib_STOR_Test_Teardown(void)
     BPLib_STOR_Destroy(&BplibInst);
 }
 
+/** Commit one fixture bundle and configure the next load to use test-owned bundle and blob
+ * storage. */
 void BPLib_STOR_Test_SetupOneBundleStored(void)
 {
     BPLib_STOR_Test_Setup();
@@ -189,6 +193,8 @@ void BPLib_STOR_Test_SetupOneBundleStored(void)
     UT_SetHookFunction(UT_KEY(BPLib_CBOR_DecodeBundle), DecodeFixture, NULL);
 }
 
+/** Release the source fixture and close its in-memory database; decoded backing storage is
+ * static. */
 void BPLib_STOR_Test_TeardownOneBundleStored(void)
 {
     BPLib_STOR_Test_FreeTestBundle(&TestBundle);

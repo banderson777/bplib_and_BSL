@@ -48,6 +48,7 @@ static BPLib_CRC_Val_t BPLib_CRC_Digest16(const void *Data, size_t DataLen)
     return BPLib_CRC_GetCrc16X25(Data, DataLen);
 }
 
+/** Compute CRC32C for the caller’s byte range through the generic digest callback. */
 static BPLib_CRC_Val_t BPLib_CRC_Digest32(const void *Data, size_t DataLen)
 {
     return BPLib_CRC_GetCrc32Castagnoli(Data, DataLen);

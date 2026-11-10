@@ -252,6 +252,8 @@ SQL_Status_t BPLib_SQL_InitDb(const char* DbName, sqlite3** ActiveDbPtr)
     return SQLITE_OK;
 }
 
+/** Create or update storage tables and read persisted accounting before publishing the initial
+ * counters. */
 SQL_Status_t BPLib_SQL_InitTable(BPLib_Instance_t* Inst)
 {
     /* One SELECT observes a consistent accounting snapshot. Reject malformed
@@ -304,6 +306,8 @@ SQL_Status_t BPLib_SQL_InitTable(BPLib_Instance_t* Inst)
     return SQLITE_OK;
 }
 
+/** Open and initialize the instance’s SQLite store. Close and clear the handle if schema or
+ * accounting recovery fails. */
 BPLib_Status_t BPLib_SQL_Init(BPLib_Instance_t* Inst, const char* DbName)
 {
     BPLib_Status_t Status;
@@ -372,6 +376,7 @@ static int BPLib_SQL_ReadAccountingValue(sqlite3 *db, const char *Query,
     return Status;
 }
 
+/** Read a validated total row count; write the caller’s output only on success. */
 SQL_Status_t BPLib_SQL_GetNumStoredBundles(sqlite3 *db, uint32_t *BundleCnt)
 {
     if (BundleCnt == NULL) return SQLITE_MISUSE;
@@ -381,6 +386,8 @@ SQL_Status_t BPLib_SQL_GetNumStoredBundles(sqlite3 *db, uint32_t *BundleCnt)
     return Status;
 }
 
+/** Read the count of rows marked attempted, rejecting invalid flag values without changing the
+ * caller’s output. */
 SQL_Status_t BPLib_SQL_GetNumEgressed(sqlite3 *db, size_t *EgressCnt)
 {
     if (EgressCnt == NULL) return SQLITE_MISUSE;
@@ -390,6 +397,7 @@ SQL_Status_t BPLib_SQL_GetNumEgressed(sqlite3 *db, size_t *EgressCnt)
     return Status;
 }
 
+/** Read a validated sum of stored bundle bytes, treating an empty store as zero. */
 SQL_Status_t BPLib_SQL_GetTotalBundleBytes(sqlite3 *db, uint64_t *TotalBytes)
 {
     if (TotalBytes == NULL) return SQLITE_MISUSE;
@@ -428,6 +436,8 @@ static int BPLib_SQL_ReadSizePragma(sqlite3 *db, const char *Query, sqlite3_int6
     return Status;
 }
 
+/** Read SQLite page geometry and compute the database size in bytes with checked
+ * multiplication. Leave the output unchanged on failure. */
 BPLib_Status_t BPLib_SQL_GetDbSize(BPLib_Instance_t *Inst, size_t *DbSize)
 {
     if (DbSize == NULL) return BPLIB_NULL_PTR_ERROR;
@@ -542,6 +552,8 @@ static SQL_Status_t BPLib_SQL_DiscardOwned(BPLib_Instance_t *Inst, size_t *NumDi
     return Status;
 }
 
+/** Select the expired or egressed deletion path and manage its operation-local prepared
+ * statements. */
 static BPLib_Status_t BPLib_SQL_Discard(BPLib_Instance_t *Inst, size_t *NumDiscarded, bool Expired)
 {
     if (NumDiscarded) *NumDiscarded = 0;
@@ -550,22 +562,28 @@ static BPLib_Status_t BPLib_SQL_Discard(BPLib_Instance_t *Inst, size_t *NumDisca
         BPLIB_SUCCESS : BPLIB_STOR_SQL_DISCARD_ERR;
 }
 
+/** Delete eligible expired bundles and report the committed number removed. */
 BPLib_Status_t BPLib_SQL_DiscardExpired(BPLib_Instance_t *Inst, size_t *NumDiscarded)
 {
     return BPLib_SQL_Discard(Inst, NumDiscarded, true);
 }
 
+/** Run the expired selection and deletion using the caller’s statements and report only
+ * committed work. */
 SQL_Status_t BPLib_SQL_DiscardExpiredImpl(sqlite3 *db, size_t *NumDiscarded, BPLib_Instance_t *Inst)
 {
     (void)db;
     return BPLib_SQL_DiscardOwned(Inst, NumDiscarded, true);
 }
 
+/** Delete rows already marked egressed and report the committed number removed. */
 BPLib_Status_t BPLib_SQL_DiscardEgressed(BPLib_Instance_t *Inst, size_t *NumDiscarded)
 {
     return BPLib_SQL_Discard(Inst, NumDiscarded, false);
 }
 
+/** Run the egressed selection and deletion using the caller’s statements and report only
+ * committed work. */
 SQL_Status_t BPLib_SQL_DiscardEgressedImpl(BPLib_Instance_t *Inst, size_t *NumDiscarded)
 {
     return BPLib_SQL_DiscardOwned(Inst, NumDiscarded, false);
@@ -587,6 +605,8 @@ BPLib_Status_t BPLib_SQL_Cleanup(BPLib_Instance_t* Inst)
     return Status;
 }
 
+/** Build the supported EID range predicate in caller storage. Use bound parameters for values
+ * and reject invalid ranges or a clause that will not fit. */
 BPLib_Status_t BPLib_SQL_GetDestEidWhereClause(BPLib_EID_Pattern_t* DestEIDs, size_t NumEIDs, 
                                                                         char *WhereClause)
 {

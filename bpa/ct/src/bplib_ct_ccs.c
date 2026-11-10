@@ -111,6 +111,8 @@ static BPLib_Status_t BPLib_CT_InsertSequence(BPLib_CT_BundleSeqCollection_t *Co
     return BPLIB_SUCCESS;
 }
 
+/** Insert an earlier sequence into the selected disposition collection using the same bounded
+ * merge as in-order sequences. */
 BPLib_Status_t BPLib_CT_InsertOldSeqNumToOpenCcs(BPLib_CT_BundleSeqCollection_t *Collection,
                                             uint64_t BundleSeqNum, size_t *CcsSizePtr)
 {
@@ -118,6 +120,8 @@ BPLib_Status_t BPLib_CT_InsertOldSeqNumToOpenCcs(BPLib_CT_BundleSeqCollection_t 
     return BPLib_CT_InsertSequence(Collection, BundleSeqNum, CcsSizePtr);
 }
 
+/** Add one custody disposition to its open signal, splitting or flushing the signal when the
+ * configured size or range limit is reached. */
 BPLib_Status_t BPLib_CT_AddToOpenCcs(BPLib_Instance_t *Instance, size_t OpenCcsIdx,
                                     uint32_t ContactId, BPLib_CustodyBlockData_t *CtebPtr,
                                     BPLib_CT_DispositionCode_t DispositionCode)
@@ -170,6 +174,9 @@ BPLib_Status_t BPLib_CT_AddToOpenCcs(BPLib_Instance_t *Instance, size_t OpenCcsI
     return BPLIB_SUCCESS;
 }
 
+/** Find an open signal for this remote administrative EID and sequence ID.
+ * Reuse a free slot if there is no match; if all slots are occupied, send
+ * the largest signal before reusing its slot. */
 size_t BPLib_CT_GetOpenCcsIdx(BPLib_Instance_t* Instance, BPLib_EID_t *SourceAdminEID,
                                 uint64_t SequenceId)
 {
@@ -245,6 +252,8 @@ void BPLib_CT_BuildAndSendOpenCcs_Impl(BPLib_Instance_t* Instance, BPLib_CT_Open
     return;
 }
 
+/** Walk the bounded included and excluded ranges and queue storage actions. Drop the custody
+ * mutex around storage calls, then look up an accepted entry again before changing its state. */
 BPLib_Status_t BPLib_CT_ProcessBundleSeqCollection(BPLib_Instance_t *Inst,
                                                     BPLib_CT_BundleSeqCollection_t *SeqCollection)
 {

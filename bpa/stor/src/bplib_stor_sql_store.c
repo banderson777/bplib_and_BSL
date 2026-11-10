@@ -224,6 +224,8 @@ SQL_Status_t BPLib_SQL_StoreMetadata(BPLib_Bundle_t* Bundle, sqlite3_stmt *Inser
     return SQLStatus;
 }
 
+/** Write one blob row through the caller-owned statement and reset and clear its bindings
+ * before returning, so the input buffer can be reused. */
 SQL_Status_t BPLib_SQL_StoreChunk(int64_t BundleRowID, const void* Chunk, size_t ChunkSize, sqlite3_stmt *InsertBlobStmt)
 {
     if (InsertBlobStmt == NULL) return SQLITE_MISUSE;
@@ -251,6 +253,8 @@ SQL_Status_t BPLib_SQL_StoreChunk(int64_t BundleRowID, const void* Chunk, size_t
     return SQLStatus;
 }
 
+/** Encode a complete wire bundle, write metadata and ordered chunks, and release the temporary
+ * encoding. Caller owns the surrounding transaction. */
 SQL_Status_t BPLib_SQL_StoreBundle(sqlite3* db, BPLib_Bundle_t* Bundle, BPLib_SQL_StoreStatements_t *Statements)
 {
     /* Locally created bundles may own just an ADU blob and dirty decoded
@@ -335,6 +339,8 @@ static SQL_Status_t BPLib_SQL_BundleExists(sqlite3_stmt *Statement, uint32_t Bun
     return Status;
 }
 
+/** Run the pending insert batch in a transaction. Count true duplicates separately and roll
+ * back on failed writes or commit, preserving the original error. */
 SQL_Status_t BPLib_SQL_StoreImpl(BPLib_Instance_t* Inst, size_t *TotalBytesStored,
                                 size_t *DuplicateBundlesIgnored, size_t *CustodialBundles,
                                 BPLib_SQL_StoreStatements_t *Statements)
@@ -439,6 +445,8 @@ SQL_Status_t BPLib_SQL_StoreImpl(BPLib_Instance_t* Inst, size_t *TotalBytesStore
     return SQLStatus;
 }
 
+/** Prepare all insert and duplicate-query statements for the instance, run the batch, and
+ * finalize operation-local statements on every path. */
 BPLib_Status_t BPLib_SQL_Store(BPLib_Instance_t* Inst, size_t *TotalBytesStored,
                                 size_t *DuplicateBundlesIgnored, size_t *CustodialBundles)
 {

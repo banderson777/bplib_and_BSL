@@ -257,6 +257,8 @@ void Test_BPLib_CT_ProcessNewBundle_StorFull(void)
                                             Context_BPLib_AS_Increment[1].Counter);
 }
 
+/** Check that a duplicate of a durably held bundle receives an accepted disposition without
+ * replacing its entry. */
 void Test_BPLib_CT_ProcessNewBundle_Dupl(void)
 {
     BPLib_Bundle_t Bundle;
@@ -412,6 +414,7 @@ void Test_BPLib_CT_UpdateBundle_Retransmit(void)
                                             Context_BPLib_AS_Increment[0].Counter);
 }
 
+/** Check assignment of a new sequence stream and reset of its per-contact counter. */
 void Test_BPLib_CT_AssignSeqCounter_Nominal(void)
 {
     uint32_t ContId = 0;
@@ -508,6 +511,8 @@ void Test_BPLib_CT_ProcessCcs_BufErr(void)
     UtAssert_INT32_EQ(BPLib_CT_ProcessCcs(&BplibInst, &Ccs), BPLIB_BUF_LEN_ERROR);
 }
 
+/** Check that accepting sequence 33 adds one disjoint run after the existing range ending at
+ * 31. */
 void Test_BPLib_CT_SignalCustody_Accept(void)
 {
     BPLib_Bundle_t Bundle;
@@ -563,6 +568,8 @@ void Test_BPLib_CT_SignalCustody_Accept(void)
     UtAssert_EQ(size_t, BplibInst.Ct.BundleCountInCustody, 11);
 }
 
+/** Check that refusal adds the corresponding disjoint run and removes the pending custody index
+ * entry. */
 void Test_BPLib_CT_SignalCustody_Reject(void)
 {
     BPLib_Bundle_t Bundle;
@@ -633,6 +640,8 @@ void Test_BPLib_CT_TriggerGC_Nominal(void)
     UtAssert_BOOL_FALSE(BPLib_CT_TriggerCustodialGarbageCollection(&BplibInst));
 }
 
+/** Process alternating included and excluded runs and verify custody accounting after entries
+ * are re-resolved across storage calls. */
 void Test_BPLib_CT_ProcessCcs_EdgeCase(void)
 {
     BPLib_CT_DeserializedCcs_t Ccs;

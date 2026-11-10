@@ -108,6 +108,8 @@ static size_t BPLib_CBOR_AddByteStringHead(uint64_t DataSize,
 }
 
 
+/** Encode the payload block and its CRC when requested, reading payload data from the bundle’s
+ * backing storage without assuming contiguous bytes. */
 BPLib_Status_t BPLib_CBOR_EncodePayload(BPLib_Bundle_t* StoredBundle,
                                         void* OutputBuffer,
                                         size_t OutputBufferSize,

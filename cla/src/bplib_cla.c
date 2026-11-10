@@ -287,6 +287,9 @@ BPLib_Status_t BPLib_CLA_ContactSetup(BPLib_Instance_t *Inst, uint32_t ContactId
     return Status;
 }
 
+/** Start a configured or stopped contact and assign its custody sequence stream.
+ * Publish the started state only after both succeed; stop the transport again
+ * if sequence allocation fails. */
 BPLib_Status_t BPLib_CLA_ContactStart(BPLib_Instance_t *Inst, uint32_t ContactId)
 {
     BPLib_Status_t              Status;
@@ -478,6 +481,8 @@ BPLib_Status_t BPLib_CLA_GetContactRunState(uint32_t ContactId, BPLib_CLA_Contac
     }
 }
 
+/** Update the runtime state for a valid contact ID. Callers enforce the allowed transition for
+ * their operation. */
 BPLib_Status_t BPLib_CLA_SetContactRunState(uint32_t ContactId, BPLib_CLA_ContactRunState_t RunState)
 {
     BPLib_Status_t Status;

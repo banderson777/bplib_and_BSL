@@ -169,6 +169,9 @@ BPLib_Status_t BPLib_CT_SetBundleId(BPLib_Bundle_t *Bundle)
     return BPLIB_SUCCESS;
 }
 
+/** Classify incoming custody before storage. Resolve duplicates before admission limits, retain
+ * an already-owned entry, and avoid taking the storage lock while waiting under the custody
+ * lock. */
 BPLib_Status_t BPLib_CT_ProcessNewBundle(BPLib_Instance_t* Inst, BPLib_Bundle_t *Bundle)
 {
     BPLib_Status_t Status = BPLIB_SUCCESS;
@@ -329,6 +332,8 @@ BPLib_Status_t BPLib_CT_SignalCustody(BPLib_Instance_t *Inst, BPLib_Bundle_t *Bu
     return Status;
 }
 
+/** Prepare custody metadata for outbound forwarding. Allocate a new sequence stream when needed
+ * and update the CTDB before publishing changed extension fields. */
 BPLib_Status_t BPLib_CT_UpdateBundle(BPLib_Instance_t* Inst, BPLib_Bundle_t *Bundle)
 {
     BPLib_Status_t            Status = BPLIB_SUCCESS;
@@ -440,6 +445,8 @@ BPLib_Status_t BPLib_CT_UpdateBundle(BPLib_Instance_t* Inst, BPLib_Bundle_t *Bun
     return Status;
 }
 
+/** Validate collection count and each range shape before processing that collection. Return a
+ * BPLib status so callers can report rejected custody signals. */
 BPLib_Status_t BPLib_CT_ProcessCcs(BPLib_Instance_t *Inst, BPLib_CT_DeserializedCcs_t *Ccs)
 {
     size_t SeqCollectIdx;
@@ -501,6 +508,8 @@ static BPLib_Status_t BPLib_CT_AssignSeqCounterUnlocked(BPLib_Instance_t *Inst, 
     return BPLIB_SUCCESS;
 }
 
+/** Assign a fresh sequence stream for a valid contact while holding the custody mutex;
+ * propagate persistence or validation failure. */
 BPLib_Status_t BPLib_CT_AssignSeqCounter(BPLib_Instance_t *Inst, uint32_t ContactId)
 {
     if (Inst == NULL) return BPLIB_NULL_PTR_ERROR;

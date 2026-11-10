@@ -186,6 +186,8 @@ void BPLib_MEM_BlockListFree(BPLib_MEM_Pool_t* pool, BPLib_MEM_Block_t* head)
     }
 }
 
+/** Allocate a bundle and copy the supplied bytes into a pool-backed blob. Release partial
+ * allocation on failure and return an owned bundle on success. */
 BPLib_Bundle_t* BPLib_MEM_BundleAlloc(BPLib_MEM_Pool_t* pool, const void* blob_data, size_t data_len)
 {
     BPLib_Bundle_t    *bundle;
@@ -304,6 +306,8 @@ BPLib_Status_t BPLib_MEM_BlobCopyOut(BPLib_Bundle_t* bundle, void* out_buffer, s
 }
 
 
+/** Copy an exact range from the bundle’s blob across block boundaries. Reject invalid ranges
+ * and insufficient caller storage before copying. */
 BPLib_Status_t BPLib_MEM_CopyOutFromOffset(BPLib_Bundle_t* Bundle, uint64_t Offset,
                     uint64_t NumBytesToCopy, void* OutputBuffer, size_t OutputBufferSize)
 {
@@ -373,12 +377,16 @@ size_t BPLib_MEM_GetHighwaterMark(BPLib_MEM_Pool_t *Pool)
     return Pool->HighWaterMark;
 }
 
+/** Recover the enclosing pool block from a pointer to its embedded user data; the address must
+ * belong to a live pool block. */
 BPLib_MEM_Block_t *BPLib_MEM_GetBlockFromUserData(void *UserData)
 {
     /* Return pointer to the top of the mem block if given a pointer to a block's user_data */
     return (BPLib_MEM_Block_t*)((uintptr_t)UserData - offsetof(BPLib_MEM_Block_t, user_data));
 }
 
+/** Find the decoded payload or extension header for a block number and return a borrowed
+ * pointer into the bundle. */
 static BPLib_CanBlockHeader_t *BPLib_BlockHeaderFind(BPLib_Bundle_t *bundle, uint64_t num)
 {
     if (!bundle) return NULL;
@@ -390,6 +398,8 @@ static BPLib_CanBlockHeader_t *BPLib_BlockHeaderFind(BPLib_Bundle_t *bundle, uin
     return NULL;
 }
 
+/** Initialize a bounded reader over the selected decoded block. Keep the bundle and its backing
+ * data alive while reading. */
 BPLib_Status_t BPLib_BlockReaderOpen(BPLib_Bundle_t *bundle, uint64_t num, BPLib_BlockReader_t *reader)
 {
     BPLib_CanBlockHeader_t *h = BPLib_BlockHeaderFind(bundle, num);
@@ -398,6 +408,8 @@ BPLib_Status_t BPLib_BlockReaderOpen(BPLib_Bundle_t *bundle, uint64_t num, BPLib
     return BPLIB_SUCCESS;
 }
 
+/** Read up to the caller capacity from the open block and report progress. Advance the reader
+ * only after a successful copy. */
 BPLib_Status_t BPLib_BlockReaderRead(BPLib_BlockReader_t *reader, void *buf, size_t cap, size_t *got)
 {
     if (!reader || !buf || !got) return BPLIB_NULL_PTR_ERROR;
@@ -409,6 +421,9 @@ BPLib_Status_t BPLib_BlockReaderRead(BPLib_BlockReader_t *reader, void *buf, siz
     return st;
 }
 
+/** Open a fixed-length replacement for an existing block. Allocate staging
+ * storage, borrow the bundle until close, and reject any length different
+ * from the existing block data size. */
 BPLib_Status_t BPLib_BlockWriterOpen(BPLib_Bundle_t *bundle, uint64_t num, size_t len, BPLib_BlockWriter_t *writer)
 {
     BPLib_CanBlockHeader_t *h = BPLib_BlockHeaderFind(bundle, num);
@@ -419,6 +434,8 @@ BPLib_Status_t BPLib_BlockWriterOpen(BPLib_Bundle_t *bundle, uint64_t num, size_
     return BPLIB_SUCCESS;
 }
 
+/** Copy bytes into the open writer’s staging buffer. Reject a write larger
+ * than the remaining capacity without changing the write position. */
 BPLib_Status_t BPLib_BlockWriterWrite(BPLib_BlockWriter_t *writer, const void *buf, size_t len)
 {
     if (!writer || !buf) return BPLIB_NULL_PTR_ERROR;
@@ -428,6 +445,9 @@ BPLib_Status_t BPLib_BlockWriterWrite(BPLib_BlockWriter_t *writer, const void *b
     return BPLIB_SUCCESS;
 }
 
+/** Consume the open writer and free its staging buffer. Pass success=false
+ * to discard. On commit, require the full length, overwrite the existing
+ * block bytes, and mark its header for re-encoding. Do not close twice. */
 BPLib_Status_t BPLib_BlockWriterClose(BPLib_BlockWriter_t *writer, bool success)
 {
     if (!writer) return BPLIB_NULL_PTR_ERROR;

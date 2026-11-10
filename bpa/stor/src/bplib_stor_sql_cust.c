@@ -42,6 +42,8 @@ const char* MarkForDeletionSQL =
 
 
 
+/** Validate the destination filters and prepare a scoped update for unegressed custodial
+ * bundles. Report the number updated only after commit. */
 BPLib_Status_t BPLib_SQL_SetNewRetransmitTrigger(BPLib_Instance_t *Inst, uint32_t ContactId,
                 BPLib_EID_Pattern_t* DestEIDs, size_t NumEIDs, size_t RetransmitTrigger, size_t *NumUpdated)
 {
@@ -106,6 +108,8 @@ BPLib_Status_t BPLib_SQL_SetNewRetransmitTrigger(BPLib_Instance_t *Inst, uint32_
     return Status;
 }
 
+/** Bind filters and retransmission settings to the caller-owned statement, applying the update
+ * transactionally. */
 SQL_Status_t BPLib_SQL_SetNewRetransmitTriggerImpl(sqlite3* db, BPLib_EID_Pattern_t* DestEIDs, 
                             size_t NumEIDs, size_t RetransmitTrigger, size_t *NumUpdated, sqlite3_stmt *SetRetransmitAllStmt)
 {
@@ -197,6 +201,8 @@ rollback:
     return SQLStatus;
 }
 
+/** Prepare the start, stop, and delete updates for one batch. Finalize every statement and
+ * adjust the unegressed count only on success. */
 BPLib_Status_t BPLib_SQL_UpdateCustodialBundles(BPLib_Instance_t *Inst, BPLib_STOR_CtUpdateBatch_t *Batch)
 {
     if (Inst == NULL || Batch == NULL) return BPLIB_NULL_PTR_ERROR;
@@ -220,6 +226,8 @@ BPLib_Status_t BPLib_SQL_UpdateCustodialBundles(BPLib_Instance_t *Inst, BPLib_ST
     return BPLIB_SUCCESS;
 }
 
+/** Execute the batch in one transaction. Roll back on invalid operations or SQL errors and
+ * report no committed deletes on failure. */
 SQL_Status_t BPLib_SQL_UpdateCustodialBundlesImpl(sqlite3 *db, BPLib_STOR_CtUpdateBatch_t *Batch, size_t *NumEgressed, BPLib_SQL_CustodyStatements_t *Statements)
 {
     *NumEgressed = 0;

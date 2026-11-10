@@ -150,6 +150,8 @@ BPLib_Status_t BPLib_SQL_FindForEIDs(BPLib_Instance_t* Inst, BPLib_STOR_LoadBatc
     return Status;
 }
 
+/** Step the prepared selection for the supplied endpoint ranges. Populate the load batch only
+ * when the query completes successfully. */
 SQL_Status_t BPLib_SQL_FindForEIDsImpl(BPLib_Instance_t* Inst, BPLib_STOR_LoadBatch_t* Batch,
                                         BPLib_EID_Pattern_t* DestEIDs, size_t NumEIDs,
                                         size_t MaxBundles, bool LocalDelivery, sqlite3_stmt *FindForEgressIDStmt)
@@ -269,6 +271,8 @@ SQL_Status_t BPLib_SQL_FindForEIDsImpl(BPLib_Instance_t* Inst, BPLib_STOR_LoadBa
     return SQLStatus;
 }
 
+/** Prepare and apply the egress update for a loaded batch. Release the statement and publish
+ * accounting after successful commit. */
 BPLib_Status_t BPLib_SQL_MarkBatchEgressed(BPLib_Instance_t *Inst,
                                          BPLib_STOR_LoadBatch_t *Batch, bool LocalDelivery)
 {
@@ -289,6 +293,8 @@ BPLib_Status_t BPLib_SQL_MarkBatchEgressed(BPLib_Instance_t *Inst,
     return Status == SQLITE_OK ? BPLIB_SUCCESS : BPLIB_STOR_SQL_MARK_EGRESSED_ERR;
 }
 
+/** Mark selected rows using the caller-owned statement within a transaction; roll back instead
+ * of reporting a partial batch. */
 SQL_Status_t BPLib_SQL_MarkBatchEgressedImpl(BPLib_Instance_t *Inst,
                                           BPLib_STOR_LoadBatch_t *Batch, bool LocalDelivery,
                                           sqlite3_stmt *MarkEgressedStmt, sqlite3_stmt *ResetRetransmitStmt)
@@ -403,6 +409,8 @@ static BPLib_Status_t BPLib_SQL_LoadPortable(BPLib_Instance_t *Inst, int64_t Row
     return Status;
 }
 
+/** Load one stored row using portable recovery metadata when present or the legacy reader
+ * otherwise. A successful call transfers the allocated bundle to the caller. */
 BPLib_Status_t BPLib_SQL_LoadBundle(BPLib_Instance_t* Inst, int64_t BundleRowID,
                                     BPLib_Bundle_t** Bundle)
 {
@@ -465,6 +473,8 @@ BPLib_Status_t BPLib_SQL_LoadBundle(BPLib_Instance_t* Inst, int64_t BundleRowID,
     return Status;
 }
 
+/** Read legacy metadata and blob blocks into a reconstructed bundle. Release the partially
+ * built chain if any row or allocation fails. */
 SQL_Status_t BPLib_SQL_LoadBundleImpl(BPLib_Instance_t* Inst, int64_t BundleRowID,
                                         BPLib_Bundle_t** Bundle, sqlite3_stmt *FindBlobStmt)
 {

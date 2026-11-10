@@ -183,6 +183,8 @@ BPLib_Status_t BPLib_STOR_FlushPendingUnlocked(BPLib_Instance_t* Inst,
 }
 
 
+/** Apply the supplied batch while the caller holds the storage mutex. Preserve queued updates
+ * when SQL fails so a later call can retry. */
 BPLib_Status_t BPLib_STOR_UpdateCustodialBundlesUnlocked(BPLib_Instance_t* Inst, BPLib_STOR_CtUpdateBatch_t *CustodyBatch)
 {
     BPLib_Status_t Status;
@@ -262,6 +264,8 @@ BPLib_Status_t BPLib_STOR_StorageTblValidateFunc(void *TblData)
     return ReturnCode;
 }
 
+/** Check admission under the instance lock and enqueue or flush an owned bundle. Perform final
+ * custody signaling outside the storage lock and only accept after commit. */
 BPLib_Status_t BPLib_STOR_StoreBundle(BPLib_Instance_t* Inst, BPLib_Bundle_t* Bundle)
 {
     BPLib_Status_t       Status;
@@ -382,6 +386,8 @@ BPLib_Status_t BPLib_STOR_FlushPending(BPLib_Instance_t* Inst)
     return Status;
 }
 
+/** Load or service the selected channel or contact batch. Return the number queued and preserve
+ * retryable work when storage cannot mark an attempt. */
 BPLib_Status_t BPLib_STOR_EgressForID(BPLib_Instance_t* Inst, uint32_t EgressID,
                                         bool LocalDelivery, size_t* NumEgressed)
 {
@@ -563,6 +569,8 @@ bool BPLib_STOR_IsIngressEgressActive(BPLib_Instance_t* Inst)
     return IsActive;
 }
 
+/** Retry retained custody work, discard eligible rows, and refresh storage accounting under the
+ * instance lock. Return the first error rather than masking it with later success. */
 BPLib_Status_t BPLib_STOR_GarbageCollect(BPLib_Instance_t* Inst)
 {
     BPLib_Status_t       Status = BPLIB_SUCCESS;
@@ -734,6 +742,8 @@ BPLib_Status_t BPLib_STOR_Cleanup(BPLib_Instance_t* Inst)
     return Status;
 }
 
+/** Append a custody operation under the instance storage lock, flushing a full batch first.
+ * Return failure if no space can be made safely. */
 BPLib_Status_t BPLib_STOR_AddToCustodialUpdateBatch(BPLib_Instance_t *Inst, uint32_t BundleId,
                                                    BPLib_CT_StorOp_t Op)
 {
