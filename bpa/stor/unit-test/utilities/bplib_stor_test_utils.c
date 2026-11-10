@@ -112,6 +112,8 @@ static int32 EncodeFixture(void *User, int32 Status, uint32 Calls, const UT_Stub
     return BPLIB_SUCCESS;
 }
 
+/* Restore the bytes that SQL actually loaded, with decoded metadata supplied by
+ * the one-bundle fixture. The bundle borrows test-owned static blob storage. */
 static int32 DecodeFixture(void *User, int32 Status, uint32 Calls, const UT_StubContext_t *Ctx)
 {
     (void)User;
@@ -179,6 +181,8 @@ void BPLib_STOR_Test_SetupOneBundleStored(void)
 
     BPLib_STOR_FlushPending(&BplibInst);
 
+    /* The portable load path allocates the whole bundle before decoding. Give
+     * its one expected allocation fresh storage that lives through assertions. */
     memset(&LoadedBundle, 0, sizeof(LoadedBundle));
     memset(&LoadedBlob, 0, sizeof(LoadedBlob));
     UT_SetDeferredRetcode(UT_KEY(BPLib_MEM_BundleAlloc), 1, (uintptr_t)&LoadedBundle);

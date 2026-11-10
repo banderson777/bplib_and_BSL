@@ -86,6 +86,7 @@ target_link_libraries(coverage-bplib_stor-testrunner PUBLIC
    bplib_cla_stubs
    bplib_ct_stubs
    bplib_pi_stubs
+   # Portable SQLite store and load paths call the codec; fixture hooks supply bytes.
    bplib_cbor_stubs
    -lsqlite3
 )
