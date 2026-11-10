@@ -120,7 +120,7 @@ void Test_BPLib_STOR_GarbageCollect_SQLFail(void)
 
     UT_SetDeferredRetcode(UT_KEY(BPLib_TIME_GetMonotonicTime), 1, BPLIB_STOR_MAX_IDLE_TIME + 1);
 
-    UtAssert_INT32_EQ(BPLib_STOR_GarbageCollect(&BplibInst), BPLIB_ERROR);
+    UtAssert_INT32_EQ(BPLib_STOR_GarbageCollect(&BplibInst), BPLIB_STOR_SQL_DISCARD_ERR);
 
     /* Look for event message */
     UtAssert_STUB_COUNT(BPLib_EM_SendEvent, 3);

@@ -24,6 +24,7 @@
 
 #include "bplib_stor_test_utils.h"
 #include "bplib_pi.h"
+#include "bplib_cbor.h"
 #include "bplib_cla.h"
 #include "bplib_fwp.h"
 
@@ -40,8 +41,8 @@ BPLib_PI_ChannelTable_t TestChanTbl;
 BPLib_CLA_ContactsTable_t TestContTbl;
 BPLib_Bundle_t TestBundle;
 
-BPLib_MEM_Block_t* BBlocksMem;
-BPLib_MEM_Block_t* BlobMem;
+static BPLib_Bundle_t LoadedBundle;
+static BPLib_MEM_Block_t LoadedBlob;
 
 
 /*
@@ -49,6 +50,7 @@ BPLib_MEM_Block_t* BlobMem;
 */
 void BPLib_STOR_Test_CreateTestBundle(BPLib_Bundle_t* Bundle, uint32_t BundleId)
 {
+    memset(Bundle, 0, sizeof(*Bundle));
     /* Test Bundle (Minimal Metadata needed to store) */
     Bundle->blocks.PrimaryBlock.Timestamp.CreateTime = 797186475264;
     Bundle->blocks.PrimaryBlock.Lifetime = 5000;
@@ -88,6 +90,44 @@ void BPLib_STOR_Test_FreeTestBundle(BPLib_Bundle_t* Bundle)
 /*
 ** Function Definitions
 */
+/* The storage suite tests SQL and egress independently of BP encoding. The
+ * codec stub stores the fixture blob verbatim; real wire round trips are
+ * covered by the CBOR and integration recovery suites. */
+static int32 EncodeFixture(void *User, int32 Status, uint32 Calls, const UT_StubContext_t *Ctx)
+{
+    (void)User;
+    (void)Calls;
+    if (Status != BPLIB_SUCCESS) return Status;
+    BPLib_Bundle_t *Bundle = UT_Hook_GetArgValueByName(Ctx, "StoredBundle", BPLib_Bundle_t *);
+    unsigned char *Out = UT_Hook_GetArgValueByName(Ctx, "OutputBuffer", void *);
+    size_t Capacity = UT_Hook_GetArgValueByName(Ctx, "OutputBufferSize", size_t);
+    size_t *Length = UT_Hook_GetArgValueByName(Ctx, "NumBytesCopied", size_t *);
+    *Length = 0;
+    for (BPLib_MEM_Block_t *Block = Bundle->blob; Block; Block = Block->next)
+    {
+        if (Block->used_len > Capacity - *Length) return BPLIB_BUF_LEN_ERROR;
+        memcpy(Out + *Length, Block->user_data.BigData, Block->used_len);
+        *Length += Block->used_len;
+    }
+    return BPLIB_SUCCESS;
+}
+
+static int32 DecodeFixture(void *User, int32 Status, uint32 Calls, const UT_StubContext_t *Ctx)
+{
+    (void)User;
+    (void)Calls;
+    if (Status != BPLIB_SUCCESS) return Status;
+    BPLib_Bundle_t *Bundle = UT_Hook_GetArgValueByName(Ctx, "bundle", BPLib_Bundle_t *);
+    const void *Wire = UT_Hook_GetArgValueByName(Ctx, "CandBundle", const void *);
+    size_t Length = UT_Hook_GetArgValueByName(Ctx, "CandBundleLen", size_t);
+    if (Length > sizeof(LoadedBlob.user_data.BigData)) return BPLIB_BUF_LEN_ERROR;
+    memcpy(LoadedBlob.user_data.BigData, Wire, Length);
+    LoadedBlob.used_len = Length;
+    Bundle->blob = &LoadedBlob;
+    Bundle->blocks = TestBundle.blocks;
+    return BPLIB_SUCCESS;
+}
+
 void BPLib_STOR_Test_Setup(void)
 {
     /* Initialize test environment to default state for every test */
@@ -109,6 +149,8 @@ void BPLib_STOR_Test_Setup(void)
     UT_SetHandlerFunction(UT_KEY(BPLib_AS_Decrement), UT_Handler_BPLib_AS_Decrement, NULL);
 
     UT_SetDefaultReturnValue(UT_KEY(BPLib_NC_GetNodeConfigValue), BPLIB_MAX_LIFETIME_ALLOWED);
+
+    UT_SetHookFunction(UT_KEY(BPLib_CBOR_EncodeBundle), EncodeFixture, NULL);
 
     /* Init Storage */
     BPLib_STOR_Init(&BplibInst);
@@ -137,21 +179,16 @@ void BPLib_STOR_Test_SetupOneBundleStored(void)
 
     BPLib_STOR_FlushPending(&BplibInst);
 
-    /* We expect load bundle to MEM_Alloc twice for the test bundle: Setup BlockAlloc
-    ** to return 2 chunks
-    */
-    BBlocksMem = calloc(1, sizeof(BPLib_MEM_Block_t));
-    BlobMem = calloc(1, sizeof(BPLib_MEM_Block_t));
-    UT_SetDeferredRetcode(UT_KEY(BPLib_MEM_BlockAlloc), 1, (uintptr_t)BBlocksMem);
-    UT_SetDeferredRetcode(UT_KEY(BPLib_MEM_BlockAlloc), 1, (uintptr_t)BlobMem);
+    memset(&LoadedBundle, 0, sizeof(LoadedBundle));
+    memset(&LoadedBlob, 0, sizeof(LoadedBlob));
+    UT_SetDeferredRetcode(UT_KEY(BPLib_MEM_BundleAlloc), 1, (uintptr_t)&LoadedBundle);
+    UT_SetHookFunction(UT_KEY(BPLib_CBOR_DecodeBundle), DecodeFixture, NULL);
 }
 
 void BPLib_STOR_Test_TeardownOneBundleStored(void)
 {
     BPLib_STOR_Test_FreeTestBundle(&TestBundle);
     BPLib_STOR_Test_Teardown();
-    free(BBlocksMem);
-    free(BlobMem);
     /* SQL is run with :memory:, so the bundle automatically is deleted after test exit */
 }
 

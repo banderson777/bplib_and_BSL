@@ -260,7 +260,7 @@ void Test_BPLib_CT_ProcessNewBundle_StorFull(void)
 void Test_BPLib_CT_ProcessNewBundle_Dupl(void)
 {
     BPLib_Bundle_t Bundle;
-    BPLib_CT_DbEntry_t Entry1;  /* Existing DB entry for a duplicate bundle */
+    BPLib_CT_DbEntry_t Entry1 = {.State = BPLib_CT_InCustody};  /* Existing DB entry for a duplicate bundle */
 
     /* Set up custodial bundle */
     memset(&Bundle, 0, sizeof(BPLib_Bundle_t));
@@ -272,7 +272,7 @@ void Test_BPLib_CT_ProcessNewBundle_Dupl(void)
     UT_SetDefaultReturnValue(UT_KEY(BPLib_RBT_SearchGeneric), (UT_IntReturn_t) &(Entry1.IdRbtLink));
 
     /* Make the disposition returned from BPLib_ARP_GetDispCode an expected value */
-    UT_SetDefaultReturnValue(UT_KEY(BPLib_ARP_GetDispCodeIdx), BPLib_CT_CustodyRefused_Idx);
+    UT_SetDefaultReturnValue(UT_KEY(BPLib_ARP_GetDispCodeIdx), BPLib_CT_CustodyAccepted_Idx);
 
     /* Avoid open CCS max size trigger */
     BplibInst.ContCtxt[0].Config.CSSizeTrigger = 100;
@@ -284,11 +284,11 @@ void Test_BPLib_CT_ProcessNewBundle_Dupl(void)
     */
 
     UtAssert_INT32_EQ(BPLib_CT_ProcessNewBundle(&BplibInst, &Bundle), BPLIB_CT_DUPLICATE_ERR);
-    UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].SeqId, 12);
-    UtAssert_EQ(size_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].SeqRangeLen, 1);
-    UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].SeqRange[0], 1);
-    UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].FirstSeqNum, 33);
-    UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].LastSeqNumAdded, 33);
+    UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].SeqId, 12);
+    UtAssert_EQ(size_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].SeqRangeLen, 1);
+    UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].SeqRange[0], 1);
+    UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].FirstSeqNum, 33);
+    UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].LastSeqNumAdded, 33);
     UtAssert_EQ(bool, BplibInst.Ct.OpenCcss[0].InProgress, true);
     UtAssert_EQ(BPLib_AS_Counter_t, BUNDLE_COUNT_CUSTODY_REQUEST, 
                                             Context_BPLib_AS_Increment[0].Counter);
@@ -530,7 +530,7 @@ void Test_BPLib_CT_SignalCustody_Accept(void)
     BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].SeqRange[0] = 2;
     BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].SeqRange[1] = 2;
     BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].SeqRange[2] = 2;
-    BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].FirstSeqNum = 28;
+    BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].FirstSeqNum = 26;
     BplibInst.Ct.OpenCcss[0].MaxSize = 100;
     
     /* Set up CTDB context */
@@ -557,7 +557,7 @@ void Test_BPLib_CT_SignalCustody_Accept(void)
     UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].SeqRange[2], 2);
     UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].SeqRange[3], 1);
     UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].SeqRange[4], 1);
-    UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].FirstSeqNum, 28);
+    UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].FirstSeqNum, 26);
     UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyAccepted_Idx].LastSeqNumAdded, 33);
     UtAssert_EQ(bool, BplibInst.Ct.OpenCcss[0].InProgress, true);
     UtAssert_EQ(size_t, BplibInst.Ct.BundleCountInCustody, 11);
@@ -589,7 +589,7 @@ void Test_BPLib_CT_SignalCustody_Reject(void)
     BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].SeqRange[0] = 2;
     BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].SeqRange[1] = 2;
     BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].SeqRange[2] = 2;
-    BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].FirstSeqNum = 28;
+    BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].FirstSeqNum = 26;
     BplibInst.Ct.OpenCcss[0].MaxSize = 100;
 
     /*
@@ -614,7 +614,7 @@ void Test_BPLib_CT_SignalCustody_Reject(void)
     UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].SeqRange[2], 2);
     UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].SeqRange[3], 1);
     UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].SeqRange[4], 1);
-    UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].FirstSeqNum, 28);
+    UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].FirstSeqNum, 26);
     UtAssert_EQ(uint64_t, BplibInst.Ct.OpenCcss[0].BundleSeqCollections[BPLib_CT_CustodyRefused_Idx].LastSeqNumAdded, 33);
     UtAssert_EQ(bool, BplibInst.Ct.OpenCcss[0].InProgress, true);
     UtAssert_EQ(size_t, BplibInst.Ct.BundleCountInCustody, 10);
@@ -688,6 +688,8 @@ void Test_BPLib_CT_ProcessCcs_EdgeCase(void)
 
                 DbEntries[DbEntryIdx].SeqNum = CurrSeqNum + j;
                 UT_SetDeferredRetcode(UT_KEY(BPLib_RBT_SearchGeneric), RetCount, (UT_IntReturn_t) &(DbEntries[DbEntryIdx].SeqRbtLink));
+                /* Accepted entries are looked up again after the storage request. */
+                UT_SetDeferredRetcode(UT_KEY(BPLib_RBT_SearchGeneric), 1, (UT_IntReturn_t) &(DbEntries[DbEntryIdx].SeqRbtLink));
                 DbEntryIdx++;
             }
         }

@@ -30,11 +30,15 @@ repository's docs/ directory. This branch supports the native integration lab.
 - `bpa/stor/src/bplib_stor_sql_load.h`
 - `bpa/stor/src/bplib_stor_sql_store.c`
 - `bpa/stor/src/bplib_stor_sql_store.h`
+- `bpa/stor/unit-test/CMakeLists.txt`
+- `bpa/stor/unit-test/bplib_stor_tests.c`
 - `bpa/stor/unit-test/stubs/bplib_stor_stubs.c`
+- `bpa/stor/unit-test/utilities/bplib_stor_test_utils.c`
 - `ci/cbor/src/bplib_cbor_decode_canonical.c`
 - `ci/cbor/src/bplib_cbor_decode_types.c`
 - `ci/cbor/src/bplib_cbor_encode_bundle.c`
 - `ci/cbor/src/bplib_cbor_encode_payload.c`
+- `ci/cbor/unit-test/bplib_cbor_decode_bundle_test.c`
 - `ci/crc/src/bplib_crc.c`
 - `ci/mem/inc/bplib_mem.h`
 - `ci/mem/src/bplib_mem.c`
@@ -46,3 +50,9 @@ repository's docs/ directory. This branch supports the native integration lab.
 tested in the integration project; recorded historical validations refer to their
 pinned source snapshots. Publication adds attribution notices and Git packaging
 without changing the tested program logic.
+
+The standalone coverage suite exercises custody acceptance and sequence ranges,
+portable SQLite storage, and rejection of data after the CBOR payload. The
+storage runner uses a codec stub so it can test SQL and egress behavior in
+isolation. The parent integration suite tests SQLite recovery with the real
+codec.
